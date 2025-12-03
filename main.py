@@ -1,5 +1,4 @@
 
-
 # ---------------- CONFIG - set tokens directly here ----------------
 TELEGRAM_BOT_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN_HERE"
 OPENAI_API_KEY = "YOUR_OPENAI_API_KEY_HERE"  # optional - leave empty to use manual admin validation
@@ -43,6 +42,7 @@ import sqlite3
 from datetime import datetime
 from typing import Dict, List, Optional
 import html as _html
+import os
 
 from openai import OpenAI
 from telegram import (
@@ -65,85 +65,69 @@ logger = logging.getLogger(__name__)
 
 # ---------------- OPENAI CLIENT ----------------
 ai_client: Optional[OpenAI] = None
-if OPENAI_API_KEY:
+if OPENAI_API_KEY and not OPENAI_API_KEY.startswith("YOUR_"):
     try:
         ai_client = OpenAI(api_key=OPENAI_API_KEY)
     except Exception as e:
         logger.warning("OpenAI client init failed: %s. Bot will fall back to manual admin validation.", e)
         ai_client = None
 
-# ---------------- SQLITE STATS ----------------
-def init_db() -> None:
+# ---------------- GLOBAL DB CONNECTION + LOCK (initialized in setup_db) ----------------
+db_conn: Optional[sqlite3.Connection] = None
+db_lock: Optional[asyncio.Lock] = None
+
+def init_db():
+    """Create DB file and table if missing (legacy safe)."""
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute("""
         CREATE TABLE IF NOT EXISTS stats (
-            user_id TEXT PRIMARY KEY,
-            games_played INTEGER DEFAULT 0,
-            total_validated_words INTEGER DEFAULT 0,
-            total_wordlists_sent INTEGER DEFAULT 0
+            user_id TEXT PRIMARY KEY
+            -- other columns will be migrated if missing
         )
     """)
     conn.commit()
     conn.close()
 
-def db_ensure_user(uid: str) -> None:
-    conn = sqlite3.connect(DB_FILE)
+def db_migrate(conn: sqlite3.Connection):
+    """Add missing columns if they don't exist (safe)."""
     c = conn.cursor()
-    c.execute("SELECT 1 FROM stats WHERE user_id=?", (uid,))
-    if not c.fetchone():
-        c.execute("INSERT INTO stats (user_id) VALUES (?)", (uid,))
+    # get existing columns
+    c.execute("PRAGMA table_info(stats)")
+    cols = [row[1] for row in c.fetchall()]
+    if "games_played" not in cols:
+        try:
+            c.execute("ALTER TABLE stats ADD COLUMN games_played INTEGER DEFAULT 0")
+        except Exception as e:
+            logger.debug("games_played add failed: %s", e)
+    if "total_validated_words" not in cols:
+        try:
+            c.execute("ALTER TABLE stats ADD COLUMN total_validated_words INTEGER DEFAULT 0")
+        except Exception as e:
+            logger.debug("total_validated_words add failed: %s", e)
+    if "total_wordlists_sent" not in cols:
+        try:
+            c.execute("ALTER TABLE stats ADD COLUMN total_wordlists_sent INTEGER DEFAULT 0")
+        except Exception as e:
+            logger.debug("total_wordlists_sent add failed: %s", e)
     conn.commit()
-    conn.close()
 
-def db_update_after_round(uid: str, validated_words: int, submitted_any: bool) -> None:
-    db_ensure_user(uid)
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    if submitted_any:
-        c.execute("""
-            UPDATE stats
-            SET total_wordlists_sent = total_wordlists_sent + 1,
-                total_validated_words = total_validated_words + ?
-            WHERE user_id=?
-        """, (validated_words, uid))
-    conn.commit()
-    conn.close()
-
-def db_update_after_game(user_ids: List[str]) -> None:
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    for uid in user_ids:
-        db_ensure_user(uid)
-        c.execute("UPDATE stats SET games_played = games_played + 1 WHERE user_id=?", (uid,))
-    conn.commit()
-    conn.close()
-
-def db_get_stats(uid: str):
-    db_ensure_user(uid)
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("SELECT games_played, total_validated_words, total_wordlists_sent FROM stats WHERE user_id=?", (uid,))
-    row = c.fetchone()
-    conn.close()
-    if row:
-        return {"games_played": row[0], "total_validated_words": row[1], "total_wordlists_sent": row[2]}
-    return {"games_played": 0, "total_validated_words": 0, "total_wordlists_sent": 0}
-
-def db_dump_all():
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("SELECT user_id, games_played, total_validated_words, total_wordlists_sent FROM stats ORDER BY total_validated_words DESC")
-    rows = c.fetchall()
-    conn.close()
-    return rows
-
-def db_reset_all():
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("UPDATE stats SET games_played=0, total_validated_words=0, total_wordlists_sent=0")
-    conn.commit()
-    conn.close()
+async def setup_db():
+    """Set up a global SQLite connection with WAL mode and an asyncio lock."""
+    global db_conn, db_lock
+    # ensure file and minimal table exist
+    init_db()
+    # open connection with check_same_thread=False so it can be used across threads/tasks
+    db_conn = sqlite3.connect(DB_FILE, check_same_thread=False, isolation_level=None)
+    # enable WAL mode for better concurrency
+    try:
+        db_conn.execute("PRAGMA journal_mode=WAL;")
+    except Exception as e:
+        logger.warning("Failed to set WAL mode: %s", e)
+    # run migrations to add missing columns
+    db_migrate(db_conn)
+    # ensure required columns exist for older DBs by creating them if missing (redundant but safe)
+    db_lock = asyncio.Lock()
 
 # ---------------- UTIL ----------------
 def escape_html(text: str) -> str:
@@ -172,6 +156,84 @@ def extract_answers_from_text(text: str, count: int) -> List[str]:
     while len(answers) < count:
         answers.append("")
     return answers[:count]
+
+# ---------------- ASYNC DB HELPERS ----------------
+async def db_ensure_user(uid: str) -> None:
+    global db_conn, db_lock
+    if db_conn is None:
+        raise RuntimeError("DB not initialized")
+    async with db_lock:
+        c = db_conn.cursor()
+        c.execute("SELECT 1 FROM stats WHERE user_id=?", (uid,))
+        if not c.fetchone():
+            c.execute("INSERT INTO stats (user_id, games_played, total_validated_words, total_wordlists_sent) VALUES (?, 0, 0, 0)", (uid,))
+        db_conn.commit()
+
+async def db_update_after_round(uid: str, validated_words: int, submitted_any: bool) -> None:
+    global db_conn, db_lock
+    if db_conn is None:
+        raise RuntimeError("DB not initialized")
+    async with db_lock:
+        c = db_conn.cursor()
+        # ensure user exists
+        c.execute("SELECT 1 FROM stats WHERE user_id=?", (uid,))
+        if not c.fetchone():
+            c.execute("INSERT INTO stats (user_id, games_played, total_validated_words, total_wordlists_sent) VALUES (?, 0, 0, 0)", (uid,))
+        if submitted_any:
+            c.execute("""
+                UPDATE stats
+                SET total_wordlists_sent = total_wordlists_sent + 1,
+                    total_validated_words = total_validated_words + ?
+                WHERE user_id=?
+            """, (validated_words, uid))
+        db_conn.commit()
+
+async def db_update_after_game(user_ids: List[str]) -> None:
+    global db_conn, db_lock
+    if db_conn is None:
+        raise RuntimeError("DB not initialized")
+    async with db_lock:
+        c = db_conn.cursor()
+        for uid in user_ids:
+            c.execute("SELECT 1 FROM stats WHERE user_id=?", (uid,))
+            if not c.fetchone():
+                c.execute("INSERT INTO stats (user_id, games_played, total_validated_words, total_wordlists_sent) VALUES (?, 0, 0, 0)", (uid,))
+            c.execute("UPDATE stats SET games_played = COALESCE(games_played,0) + 1 WHERE user_id=?", (uid,))
+        db_conn.commit()
+
+async def db_get_stats(uid: str):
+    global db_conn, db_lock
+    if db_conn is None:
+        raise RuntimeError("DB not initialized")
+    async with db_lock:
+        c = db_conn.cursor()
+        c.execute("SELECT games_played, total_validated_words, total_wordlists_sent FROM stats WHERE user_id=?", (uid,))
+        row = c.fetchone()
+        if row:
+            return {"games_played": row[0] or 0, "total_validated_words": row[1] or 0, "total_wordlists_sent": row[2] or 0}
+        # ensure row exists
+        c.execute("INSERT OR IGNORE INTO stats (user_id, games_played, total_validated_words, total_wordlists_sent) VALUES (?, 0, 0, 0)", (uid,))
+        db_conn.commit()
+        return {"games_played": 0, "total_validated_words": 0, "total_wordlists_sent": 0}
+
+async def db_dump_all():
+    global db_conn, db_lock
+    if db_conn is None:
+        raise RuntimeError("DB not initialized")
+    async with db_lock:
+        c = db_conn.cursor()
+        c.execute("SELECT user_id, games_played, total_validated_words, total_wordlists_sent FROM stats ORDER BY total_validated_words DESC")
+        rows = c.fetchall()
+        return rows
+
+async def db_reset_all():
+    global db_conn, db_lock
+    if db_conn is None:
+        raise RuntimeError("DB not initialized")
+    async with db_lock:
+        c = db_conn.cursor()
+        c.execute("UPDATE stats SET games_played=0, total_validated_words=0, total_wordlists_sent=0")
+        db_conn.commit()
 
 # ---------------- AI VALIDATION ----------------
 async def ai_validate(category: str, answer: str, letter: str) -> bool:
@@ -545,7 +607,7 @@ async def run_game(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
     # initialize scores
     g["scores"] = {uid: 0 for uid in g["players"].keys()}
     # update DB games played
-    db_update_after_game(list(g["players"].keys()))
+    await db_update_after_game(list(g["players"].keys()))
     for r in range(1, rounds + 1):
         g["round"] = r
         if mode == "classic":
@@ -659,7 +721,7 @@ async def run_game(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
                 validated_count += 1
             round_scores[uid] = {"points": pts, "validated": validated_count, "submitted_any": submitted_any}
             g["scores"][uid] = g["scores"].get(uid, 0) + pts
-            db_update_after_round(uid, validated_count, submitted_any)
+            await db_update_after_round(uid, validated_count, submitted_any)
         g["round_scores_history"] = g.get("round_scores_history", []) + [round_scores]
         # summary message
         header = f"<b>Round {r} Results</b>\nLetter: <b>{escape_html(letter)}</b>\n\n"
@@ -844,8 +906,8 @@ async def categories_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def mystats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     target = update.message.reply_to_message.from_user if update.message.reply_to_message else update.effective_user
     uid = str(target.id)
-    s = db_get_stats(uid)
-    all_rows = db_dump_all()
+    s = await db_get_stats(uid)
+    all_rows = await db_dump_all()
     rank = 1
     for idx, row in enumerate(all_rows, start=1):
         if row[0] == uid:
@@ -863,7 +925,7 @@ async def dumpstats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_owner(user.id):
         await update.message.reply_text("Only bot owner can use this command.")
         return
-    rows = db_dump_all()
+    rows = await db_dump_all()
     header = "user_id,games_played,total_validated_words,total_wordlists_sent\n"
     csv_path = "/tmp/stats_export.csv"
     with open(csv_path, "w", encoding="utf8") as f:
@@ -883,7 +945,7 @@ async def statsreset_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if not is_owner(user.id):
         await update.message.reply_text("Only bot owner can use this command.")
         return
-    db_reset_all()
+    await db_reset_all()
     await update.message.reply_text("All stats reset to zero.")
 
 async def leaderboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -891,7 +953,7 @@ async def leaderboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     if not is_owner(user.id):
         await update.message.reply_text("Only bot owner can use this command.")
         return
-    rows = db_dump_all()
+    rows = await db_dump_all()
     top10 = rows[:10]
     text = "<b>Leaderboard — Top 10 (by validated words)</b>\n\n"
     for idx, r in enumerate(top10, start=1):
@@ -919,13 +981,13 @@ async def validate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ---------------- APP SETUP ----------------
 def main():
+    # create DB and run migrations synchronously first
     init_db()
-    if not TELEGRAM_BOT_TOKEN or TELEGRAM_BOT_TOKEN.startswith("YOUR_"):
-        print("Please set TELEGRAM_BOT_TOKEN in the script before running.")
-        return
+    # ensure DB connection and lock are ready before starting handlers
+    # ApplicationBuilder will run in polling loop where our async setup can be awaited before handlers execute
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
 
-    # lobby/start commands
+    # register handlers (they will run after app.run_polling starts)
     app.add_handler(CommandHandler("classicadedonha", classic_lobby))
     app.add_handler(CommandHandler("customadedonha", custom_lobby))
     app.add_handler(CommandHandler("fastadedonha", fast_lobby))
@@ -939,11 +1001,28 @@ def main():
     app.add_handler(CommandHandler("leaderboard", leaderboard_command))
     app.add_handler(CommandHandler("validate", validate_command))
 
-    # submission handler
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, submission_handler))
 
-    print("Bot running...")
-    app.run_polling()
+    # Start app with DB setup awaited first
+    async def _run():
+        await setup_db()
+        # if TELEGRAM_BOT_TOKEN not set, warn and exit
+        if not TELEGRAM_BOT_TOKEN or TELEGRAM_BOT_TOKEN.startswith("YOUR_"):
+            print("Please set TELEGRAM_BOT_TOKEN in the script before running.")
+            return
+        print("Bot running...")
+        await app.initialize()
+        await app.start()
+        await app.updater.start_polling() if hasattr(app, "updater") else None
+        # keep running until interrupted
+        await app.wait_closed()
+
+    try:
+        asyncio.run(_run())
+    except KeyboardInterrupt:
+        print("Shutting down...")
+    except Exception as e:
+        logger.exception("Fatal error in main: %s", e)
 
 if __name__ == "__main__":
     main()
