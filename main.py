@@ -25,8 +25,8 @@ from telegram.ext import (
 
 # ---------------- CONFIG ----------------
 # You can override via environment variables (preferred)
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", None)
+TELEGRAM_BOT_TOKEN = "TELEGRAM_BOT_TOKEN"
+OPENAI_API_KEY = "OPENAI_API_KEY"
 
 # Owners (can run /dumpstats /statsreset /leaderboard)
 OWNER_IDS = {624102836, 1707015091}
