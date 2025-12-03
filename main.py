@@ -1,6 +1,6 @@
 # ---------------- CONFIG - set tokens directly here ----------------
 TELEGRAM_BOT_TOKEN = ""
-OPENAI_API_KEY = ""  # optional - leave empty to use manual admin validation
+OPENAI_API_KEY = "E"  # optional - leave empty to use manual admin validation
 
 # ---------------- OWNERS / ADMINS ----------------
 OWNERS = {"624102836", "1707015091"}  # string IDs of bot owners who can run owner-only commands
@@ -979,46 +979,8 @@ async def validate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await open_manual_validate(update, context)
 
 # ---------------- APP SETUP & MAIN ----------------
-def main():
-    # create DB and run migrations synchronously first
-    init_db()
-    # run async DB setup before starting the bot
-    try:
-        asyncio.run(setup_db())
-    except Exception as e:
-        logger.exception("DB setup failed: %s", e)
-        return
 
-    if not TELEGRAM_BOT_TOKEN or TELEGRAM_BOT_TOKEN.startswith("YOUR_"):
-        print("Please set TELEGRAM_BOT_TOKEN in the script before running.")
-        return
-
-    app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
-
-    # register handlers
-    app.add_handler(CommandHandler("classicadedonha", classic_lobby))
-    app.add_handler(CommandHandler("customadedonha", custom_lobby))
-    app.add_handler(CommandHandler("fastadedonha", fast_lobby))
-    app.add_handler(CommandHandler(["joingame","join"], joingame_command))
-    app.add_handler(CallbackQueryHandler(callback_router))
-    app.add_handler(CommandHandler("gamecancel", gamecancel_command))
-    app.add_handler(CommandHandler("categories", categories_command))
-    app.add_handler(CommandHandler("mystats", mystats_command))
-    app.add_handler(CommandHandler("dumpstats", dumpstats_command))
-    app.add_handler(CommandHandler("statsreset", statsreset_command))
-    app.add_handler(CommandHandler("leaderboard", leaderboard_command))
-    app.add_handler(CommandHandler("validate", validate_command))
-
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, submission_handler))
-
-    print("Bot running...")
-    # run_polling handles lifecycle internally
-    app.run_polling()
-
-if __name__ == "__main__":
-    main()
-
-
+# ---------------- APP SETUP & MAIN ----------------
 def main():
     # synchronous DB init
     init_db()
@@ -1034,7 +996,7 @@ def main():
         logger.exception("DB setup failed: %s", e)
         return
 
-    if not TELEGRAM_BOT_TOKEN or TELEGRAM_BOT_TOKEN.startswith("YOUR_"):
+    if not TELEGRAM_BOT_TOKEN or TELEGRAM_BOT_TOKEN.strip() == "":
         print("Please set TELEGRAM_BOT_TOKEN in the script before running.")
         return
 
