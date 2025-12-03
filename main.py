@@ -1,6 +1,6 @@
 # ---------------- CONFIG - set tokens directly here ----------------
-TELEGRAM_BOT_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN_HERE"
-OPENAI_API_KEY = "YOUR_OPENAI_API_KEY_HERE"  # optional - leave empty to use manual admin validation
+TELEGRAM_BOT_TOKEN = ""
+OPENAI_API_KEY = ""  # optional - leave empty to use manual admin validation
 
 # ---------------- OWNERS / ADMINS ----------------
 OWNERS = {"624102836", "1707015091"}  # string IDs of bot owners who can run owner-only commands
