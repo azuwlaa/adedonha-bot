@@ -1,6 +1,6 @@
 # ---------------- CONFIG - set tokens directly here ----------------
 TELEGRAM_BOT_TOKEN = ""
-OPENAI_API_KEY = "E"  # optional - leave empty to use manual admin validation
+OPENAI_API_KEY = ""  # optional - leave empty to use manual admin validation
 
 # ---------------- OWNERS / ADMINS ----------------
 OWNERS = {"624102836", "1707015091"}  # string IDs of bot owners who can run owner-only commands
@@ -23,7 +23,9 @@ ALL_CATEGORIES = [
     "Object",
     "Animal",
     "Plant",
-    "City/Country/State",
+    "City",
+    "Country",
+    "State",
     "Food",
     "Color",
     "Movie/Series/TV Show",
@@ -287,22 +289,13 @@ async def classic_lobby(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("This command works in groups only.")
         return
     args = context.args or []
-    num = 5
-    if args:
-        try:
-            val = int(args[0])
-            if 5 <= val <= 8:
-                num = val
-            else:
-                await update.message.reply_text("Please provide a number between 5 and 8. Using default 5.")
-        except Exception:
-            await update.message.reply_text("Invalid number provided. Using default 5.")
+    num = 5  # classic uses fixed 5 categories (ignore args)
     if chat.id in games and games[chat.id].get("state") in ("lobby", "running"):
         await update.message.reply_text("A game or lobby is already active in this group.")
         return
     lobby = {
         "mode": "classic",
-        "categories_per_round": num,
+        "categories_per_round": 5,
         "creator_id": user.id,
         "creator_name": user.first_name,
         "players": {str(user.id): user.first_name},
@@ -361,8 +354,8 @@ async def custom_lobby(update: Update, context: ContextTypes.DEFAULT_TYPE):
     parts = [p.strip() for p in joined.replace(",", " ").split() if p.strip()]
     # map short names to pool where possible
     for p in parts[:12]:
-        match = next((c for c in ALL_CATEGORIES if c.lower().startswith(p.lower())), None)
-        cats.append(match or p)
+        # use exact category text provided by user (no auto-matching)
+        cats.append(p)
     if len(cats) < 1:
         await update.message.reply_text("Provide at least one category.")
         return
@@ -420,13 +413,10 @@ async def fast_lobby(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("This command works in groups only.")
         return
     args = context.args or []
-    if args and len(args) >= 3:
-        cats = []
-        for a in args[:3]:
-            match = next((c for c in ALL_CATEGORIES if c.lower().startswith(a.lower())), None)
-            cats.append(match or a)
-    else:
-        cats = choose_random_categories(3)
+    if not args or len(args) < 3:
+        await update.message.reply_text("Please provide exactly 3 categories, e.g. /fastadedonha Name Object Animal")
+        return
+    cats = [a.strip() for a in args[:3]]
     if chat.id in games and games[chat.id].get("state") in ("lobby", "running"):
         await update.message.reply_text("A game or lobby is already active in this group.")
         return
@@ -537,11 +527,11 @@ async def mode_info_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     mode = g["mode"]
     if mode == "classic":
         num = g.get("categories_per_round", 5)
-        text = (f"<b>Classic Adedonha</b>\nEach round selects <b>{num}</b> categories randomly from 12.\nIf no one submits, the round ends after 3 minutes. After the first submission others have 2 seconds to submit. Total rounds: {TOTAL_ROUNDS_CLASSIC}.")
+        text = (f"<b>Classic Adedonha</b>\nEach round uses the fixed 5 categories (Name, Object, Animal, Plant, Country).\nIf no one submits, the round ends after 3 minutes. After the first submission others have 2 seconds to submit. Total rounds: {TOTAL_ROUNDS_CLASSIC}.")
     elif mode == "custom":
         pool = g.get("categories_pool", [])
         pool_html = "\n".join(f"- {escape_html(c)}" for c in pool)
-        text = (f"<b>Custom Adedonha</b>\nCategories pool for this game:\n{pool_html}\nEach round selects {len(pool)} categories randomly from the pool. Timing: same as Classic.")
+        text = (f"<b>Custom Adedonha</b>\nCategories pool for this game:\n{pool_html}\nThis game uses exactly the categories provided when creating the custom game (no randomization). Timing: same as Classic.")
     else:
         cats = g.get("fixed_categories", [])
         cats_html = "\n".join(f"- {escape_html(c)}" for c in cats)
@@ -606,23 +596,29 @@ async def run_game(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
     g["scores"] = {uid: 0 for uid in g["players"].keys()}
     # update DB games played
     await db_update_after_game(list(g["players"].keys()))
+    
     for r in range(1, rounds + 1):
         g["round"] = r
         if mode == "classic":
-            categories = choose_random_categories(per_round)
+            # Classic fixed categories
+            categories = ["Name", "Object", "Animal", "Plant", "Country"]
+            per_round = len(categories)
             letter = random.choice("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
             window_seconds = CLASSIC_FIRST_WINDOW
             no_submit_timeout = CLASSIC_NO_SUBMIT_TIMEOUT
             round_time_limit = None
         elif mode == "custom":
-            pool = g.get("categories_pool", ALL_CATEGORIES)
-            categories = random.sample(pool, min(per_round, len(pool)))
+            # Custom uses exact categories provided when creating the lobby
+            categories = g.get("categories_pool", ALL_CATEGORIES)
+            per_round = len(categories)
             letter = random.choice("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
             window_seconds = CLASSIC_FIRST_WINDOW
             no_submit_timeout = CLASSIC_NO_SUBMIT_TIMEOUT
             round_time_limit = None
-        else:  # fast
-            categories = g.get("fixed_categories", choose_random_categories(3))
+        else:
+            # Fast uses exactly the three categories provided at lobby creation
+            categories = g.get("fixed_categories", [])
+            per_round = len(categories)
             letter = random.choice("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
             window_seconds = FAST_FIRST_WINDOW
             no_submit_timeout = FAST_ROUND_SECONDS
@@ -631,11 +627,20 @@ async def run_game(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
         g["round_letter"] = letter
         g["submissions"] = {}
         g["manual_accept"] = {}
+
+        g["round_letter"] = letter
+        g["submissions"] = {}
+        g["manual_accept"] = {}
         # send round template (as plain text to avoid formatting issues)
         cat_lines_plain = "\n".join(f"{i+1}. {escape_html(c)}:" for i, c in enumerate(categories))
-        intro = (f"Round {r} / {rounds}\nLetter: {escape_html(letter)}\n\nSend your answers in ONE MESSAGE using this template (first {len(categories)} answers will be used):\n\n{cat_lines_plain}\n\n")
+        # letter bold and categories in a pre block so users can copy-paste the template
+        letter_html = f"<b>{escape_html(letter)}</b>"
+        pre_block = "\n".join(f"{i+1}. {escape_html(c)}:" for i, c in enumerate(categories))
+        intro = (f"Round {r} / {rounds}\nLetter: {letter_html}\n\n" +
+                f"<pre>{pre_block}</pre>\n\n" +
+                f"Send your answers in ONE MESSAGE using the template above (first {len(categories)} answers will be used).\n")
         intro += f"First submission starts a {window_seconds}s window for others (fast mode total round {FAST_ROUND_SECONDS}s)."
-        await context.bot.send_message(chat_id, intro)
+        await context.bot.send_message(chat_id, intro, parse_mode="HTML")
         # schedule no submit timeout
         end_event = asyncio.Event()
         first_submitter = None
@@ -744,6 +749,7 @@ async def run_game(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
     games.pop(chat_id, None)
 
 # ---------------- SUBMISSIONS ----------------
+
 async def submission_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     user = update.effective_user
@@ -756,22 +762,37 @@ async def submission_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
     uid = str(user.id)
     if uid in g.get("submissions", {}):
-        await update.message.reply_text("You already submitted for this round.")
+        try:
+            await update.message.reply_text("You already submitted for this round.")
+        except Exception:
+            pass
         return
     text = update.message.text or ""
-    g["submissions"][uid] = text
+    # Strict submission detection: require at least N answer lines where N = number of categories this round.
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    answer_lines = 0
+    for ln in lines:
+        if ':' in ln:
+            answer_lines += 1
+        elif re.match(r'^[0-9]+\.', ln):
+            answer_lines += 1
+    needed = len(g.get('current_categories', [])) or g.get('categories_per_round', 0)
+    if answer_lines < needed:
+        # not considered a submission (chat message) — ignore silently
+        return
+    # register the submission (only first valid message per player counted)
+    g['submissions'][uid] = text
     # if AI unavailable, create a single manual validation message with button (one message)
     if not ai_client:
-        if not g.get("manual_validation_msg_id"):
-            preview = ""
-            for uid2, txt in g["submissions"].items():
+        if not g.get('manual_validation_msg_id'):
+            preview = ''
+            for uid2, txt in g['submissions'].items():
                 preview += f"{g['players'][uid2]}: {txt[:120]}\n"
             kb = InlineKeyboardMarkup([[InlineKeyboardButton("Open validation panel ✅", callback_data="open_manual_validate")]])
             msg_text = f"<b>Manual validation required</b>\nAI not configured. Admins may validate via panel.\n\nSubmissions preview:\n{escape_html(preview)}"
             msg = await context.bot.send_message(chat.id, msg_text, parse_mode="HTML", reply_markup=kb)
-            g["manual_validation_msg_id"] = msg.message_id
+            g['manual_validation_msg_id'] = msg.message_id
     # normal flow: run_game waits and will score after window
-
 # ---------------- MANUAL VALIDATION PANEL ----------------
 async def open_manual_validate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cq = update.callback_query
@@ -899,7 +920,7 @@ async def gamecancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 # ---------------- CATEGORIES / MYSTATS / DUMP / RESET / LEADERBOARD ----------------
 async def categories_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = "<b>All possible categories (12):</b>\n" + "\n".join(f"{i+1}. {escape_html(c)}" for i, c in enumerate(ALL_CATEGORIES))
+    text = "<b>All possible categories (14):</b>\n" + "\n".join(f"{i+1}. {escape_html(c)}" for i, c in enumerate(ALL_CATEGORIES))
     await update.message.reply_text(text, parse_mode="HTML")
 
 async def mystats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -960,6 +981,26 @@ async def leaderboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     await update.message.reply_text(text, parse_mode="HTML")
 
 # ---------------- VALIDATE (admin-triggered manual validation) ----------------
+
+async def runinfo_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if not is_owner(user.id):
+        await update.message.reply_text("Only bot owners can use this command.")
+        return
+    lines = []
+    for chat_id, g in games.items():
+        if g.get("state") in ("lobby", "running"):
+            players = len(g.get("players", {}))
+            mode = g.get("mode")
+            round_no = g.get("round", 0)
+            creator = escape_html(g.get("creator_name", "Unknown"))
+            lines.append(f"• Chat: {chat_id}\n  Mode: {mode}\n  Round: {round_no}\n  Players: {players}\n  Creator: {creator}")
+    if not lines:
+        await update.message.reply_text("No active games currently.")
+        return
+    text = "<b>Active games:</b>\n\n" + "\n\n".join(lines)
+    await update.message.reply_text(text, parse_mode="HTML")
+
 async def validate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     user = update.effective_user
@@ -1003,6 +1044,7 @@ def main():
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
 
     # register handlers
+    app.add_handler(CommandHandler("runinfo", runinfo_command))
     app.add_handler(CommandHandler("classicadedonha", classic_lobby))
     app.add_handler(CommandHandler("customadedonha", custom_lobby))
     app.add_handler(CommandHandler("fastadedonha", fast_lobby))
