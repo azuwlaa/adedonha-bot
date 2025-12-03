@@ -1017,3 +1017,48 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+def main():
+    # synchronous DB init
+    init_db()
+
+    # Create a new event loop and set it as current so PTB can reuse it.
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+    # Run async DB setup inside the event loop without closing it
+    try:
+        loop.run_until_complete(setup_db())
+    except Exception as e:
+        logger.exception("DB setup failed: %s", e)
+        return
+
+    if not TELEGRAM_BOT_TOKEN or TELEGRAM_BOT_TOKEN.startswith("YOUR_"):
+        print("Please set TELEGRAM_BOT_TOKEN in the script before running.")
+        return
+
+    app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
+
+    # register handlers
+    app.add_handler(CommandHandler("classicadedonha", classic_lobby))
+    app.add_handler(CommandHandler("customadedonha", custom_lobby))
+    app.add_handler(CommandHandler("fastadedonha", fast_lobby))
+    app.add_handler(CommandHandler(["joingame","join"], joingame_command))
+    app.add_handler(CallbackQueryHandler(callback_router))
+    app.add_handler(CommandHandler("gamecancel", gamecancel_command))
+    app.add_handler(CommandHandler("categories", categories_command))
+    app.add_handler(CommandHandler("mystats", mystats_command))
+    app.add_handler(CommandHandler("dumpstats", dumpstats_command))
+    app.add_handler(CommandHandler("statsreset", statsreset_command))
+    app.add_handler(CommandHandler("leaderboard", leaderboard_command))
+    app.add_handler(CommandHandler("validate", validate_command))
+
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, submission_handler))
+
+    print("Bot running...")
+    app.run_polling()
+
+
+if __name__ == "__main__":
+    main()
