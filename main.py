@@ -1,16 +1,4 @@
 
----
-
-## Now — the full `main.py` (copy and paste)
-
-> This is the single file you requested. It contains configuration at top (for owners, tokens, and options). Edit OWNER_IDS and environment variables as needed.
-
-```python
-#!/usr/bin/env python3
-# main.py - Adedonha Telegram Bot (PTB 21.4)
-# Run: python main.py
-# Requirements: python-telegram-bot==21.4, openai
-
 import os
 import logging
 import random
