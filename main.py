@@ -1,3 +1,5 @@
+
+
 # ---------------- CONFIG - set tokens directly here ----------------
 TELEGRAM_BOT_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN_HERE"
 OPENAI_API_KEY = "YOUR_OPENAI_API_KEY_HERE"  # optional - leave empty to use manual admin validation
@@ -40,6 +42,7 @@ import asyncio
 import sqlite3
 from datetime import datetime
 from typing import Dict, List, Optional
+import html as _html
 
 from openai import OpenAI
 from telegram import (
@@ -143,14 +146,14 @@ def db_reset_all():
     conn.close()
 
 # ---------------- UTIL ----------------
-def escape_md_v2(text: str) -> str:
+def escape_html(text: str) -> str:
     if text is None:
         return ""
-    to_escape = r'_*[]()~`>#+-=|{}.!'
-    return ''.join(('\\' + c) if c in to_escape else c for c in str(text))
+    return _html.escape(str(text), quote=False)
 
-def user_mention_md(uid: int, name: str) -> str:
-    return f"[{escape_md_v2(name)}](tg://user?id={uid})"
+def user_mention_html(uid: int, name: str) -> str:
+    # produces: <a href="tg://user?id=UID">Name</a>
+    return f'<a href="tg://user?id={uid}">{escape_html(name)}</a>'
 
 def choose_random_categories(count: int) -> List[str]:
     return random.sample(ALL_CATEGORIES, count)
@@ -223,7 +226,6 @@ async def classic_lobby(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not chat or chat.type == "private":
         await update.message.reply_text("This command works in groups only.")
         return
-    # parse optional number (but per user request classic cannot define categories; they later preferred /customadedonha for custom categories -> here we accept optional but encourage custom)
     args = context.args or []
     num = 5
     if args:
@@ -260,9 +262,9 @@ async def classic_lobby(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("Start ▶️", callback_data="start_game")],
         [InlineKeyboardButton("Mode Info ℹ️", callback_data="mode_info")]
     ])
-    players_md = user_mention_md(user.id, user.first_name)
-    text = (f"*Adedonha lobby created!*\\n\\nMode: *Classic*\\nCategories per round: *{num}*\\nTotal rounds: *{TOTAL_ROUNDS_CLASSIC}*\\n\\nPlayers:\\n{players_md}\\n\\nPress Join to participate.")
-    msg = await update.message.reply_text(text, parse_mode="MarkdownV2", reply_markup=kb)
+    players_html = user_mention_html(user.id, user.first_name)
+    text = (f"<b>Adedonha lobby created!</b>\n\nMode: <b>Classic</b>\nCategories per round: <b>{num}</b>\nTotal rounds: <b>{TOTAL_ROUNDS_CLASSIC}</b>\n\nPlayers:\n{players_html}\n\nPress Join to participate.")
+    msg = await update.message.reply_text(text, parse_mode="HTML", reply_markup=kb)
     lobby["lobby_message_id"] = msg.message_id
     # attempt to pin
     try:
@@ -329,10 +331,10 @@ async def custom_lobby(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("Start ▶️", callback_data="start_game")],
         [InlineKeyboardButton("Mode Info ℹ️", callback_data="mode_info")]
     ])
-    players_md = user_mention_md(user.id, user.first_name)
-    cat_lines = "\\n".join(f"- {escape_md_v2(c)}" for c in cats)
-    text = (f"*Adedonha lobby created!*\\n\\nMode: *Custom*\\nCategories pool:\\n{cat_lines}\\n\\nPlayers:\\n{players_md}\\n\\nPress Join to participate.")
-    msg = await update.message.reply_text(text, parse_mode="MarkdownV2", reply_markup=kb)
+    players_html = user_mention_html(user.id, user.first_name)
+    cat_lines = "\n".join(f"- {escape_html(c)}" for c in cats)
+    text = (f"<b>Adedonha lobby created!</b>\n\nMode: <b>Custom</b>\nCategories pool:\n{cat_lines}\n\nPlayers:\n{players_html}\n\nPress Join to participate.")
+    msg = await update.message.reply_text(text, parse_mode="HTML", reply_markup=kb)
     lobby["lobby_message_id"] = msg.message_id
     try:
         await context.bot.pin_chat_message(chat.id, msg.message_id)
@@ -390,10 +392,10 @@ async def fast_lobby(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("Start ▶️", callback_data="start_game")],
         [InlineKeyboardButton("Mode Info ℹ️", callback_data="mode_info")]
     ])
-    players_md = user_mention_md(user.id, user.first_name)
-    cats_md = "\\n".join(f"- {escape_md_v2(c)}" for c in cats)
-    text = (f"*Adedonha lobby created!*\\n\\nMode: *Fast*\\nFixed categories:\\n{cats_md}\\nTotal rounds: *{TOTAL_ROUNDS_FAST}*\\n\\nPlayers:\\n{players_md}\\n\\nPress Join to participate.")
-    msg = await update.message.reply_text(text, parse_mode="MarkdownV2", reply_markup=kb)
+    players_html = user_mention_html(user.id, user.first_name)
+    cats_md = "\n".join(f"- {escape_html(c)}" for c in cats)
+    text = (f"<b>Adedonha lobby created!</b>\n\nMode: <b>Fast</b>\nFixed categories:\n{cats_md}\nTotal rounds: <b>{TOTAL_ROUNDS_FAST}</b>\n\nPlayers:\n{players_html}\n\nPress Join to participate.")
+    msg = await update.message.reply_text(text, parse_mode="HTML", reply_markup=kb)
     lobby["lobby_message_id"] = msg.message_id
     try:
         await context.bot.pin_chat_message(chat.id, msg.message_id)
@@ -440,19 +442,19 @@ async def join_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, by_c
         return
     g["players"][str(user.id)] = user.first_name
     # update lobby message
-    players_md = "\\n".join(user_mention_md(int(uid), name) for uid, name in g["players"].items())
+    players_html = "\n".join(user_mention_html(int(uid), name) for uid, name in g["players"].items())
     if g["mode"] == "classic":
-        text = (f"*Adedonha lobby created!*\\n\\nMode: *Classic*\\nCategories per round: *{g['categories_per_round']}*\\nTotal rounds: *{TOTAL_ROUNDS_CLASSIC}*\\n\\nPlayers:\\n{players_md}\\n\\nPress Join to participate.")
+        text = (f"<b>Adedonha lobby created!</b>\n\nMode: <b>Classic</b>\nCategories per round: <b>{g['categories_per_round']}</b>\nTotal rounds: <b>{TOTAL_ROUNDS_CLASSIC}</b>\n\nPlayers:\n{players_html}\n\nPress Join to participate.")
     elif g["mode"] == "custom":
-        cat_lines = "\\n".join(f"- {escape_md_v2(c)}" for c in g.get("categories_pool", []))
-        text = (f"*Adedonha lobby created!*\\n\\nMode: *Custom*\\nCategories pool:\\n{cat_lines}\\n\\nPlayers:\\n{players_md}\\n\\nPress Join to participate.")
+        cat_lines = "\n".join(f"- {escape_html(c)}" for c in g.get("categories_pool", []))
+        text = (f"<b>Adedonha lobby created!</b>\n\nMode: <b>Custom</b>\nCategories pool:\n{cat_lines}\n\nPlayers:\n{players_html}\n\nPress Join to participate.")
     else:
-        cats_md = "\\n".join(f"- {escape_md_v2(c)}" for c in g.get("fixed_categories", []))
-        text = (f"*Adedonha lobby created!*\\n\\nMode: *Fast*\\nFixed categories:\\n{cats_md}\\nTotal rounds: *{TOTAL_ROUNDS_FAST}*\\n\\nPlayers:\\n{players_md}\\n\\nPress Join to participate.")
+        cats_md = "\n".join(f"- {escape_html(c)}" for c in g.get("fixed_categories", []))
+        text = (f"<b>Adedonha lobby created!</b>\n\nMode: <b>Fast</b>\nFixed categories:\n{cats_md}\nTotal rounds: <b>{TOTAL_ROUNDS_FAST}</b>\n\nPlayers:\n{players_html}\n\nPress Join to participate.")
     try:
-        await context.bot.edit_message_text(text, chat_id=chat_id, message_id=g["lobby_message_id"], parse_mode="MarkdownV2", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"Join {PLAYER_EMOJI}", callback_data="join_lobby")],[InlineKeyboardButton("Start ▶️", callback_data="start_game")],[InlineKeyboardButton("Mode Info ℹ️", callback_data="mode_info")]]))
+        await context.bot.edit_message_text(text, chat_id=chat_id, message_id=g["lobby_message_id"], parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"Join {PLAYER_EMOJI}", callback_data="join_lobby")],[InlineKeyboardButton("Start ▶️", callback_data="start_game")],[InlineKeyboardButton("Mode Info ℹ️", callback_data="mode_info")]]))
     except Exception:
-        await context.bot.send_message(chat_id, f"{user_mention_md(user.id, user.first_name)} joined the lobby.", parse_mode="MarkdownV2")
+        await context.bot.send_message(chat_id, f"{user_mention_html(user.id, user.first_name)} joined the lobby.", parse_mode="HTML")
 
 async def joingame_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # delete user's command to keep chat clean
@@ -475,16 +477,16 @@ async def mode_info_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     mode = g["mode"]
     if mode == "classic":
         num = g.get("categories_per_round", 5)
-        text = (f"*Classic Adedonha*\\nEach round selects *{num}* categories randomly from 12.\\nIf no one submits, the round ends after 3 minutes. After the first submission others have 2 seconds to submit. Total rounds: {TOTAL_ROUNDS_CLASSIC}.")
+        text = (f"<b>Classic Adedonha</b>\nEach round selects <b>{num}</b> categories randomly from 12.\nIf no one submits, the round ends after 3 minutes. After the first submission others have 2 seconds to submit. Total rounds: {TOTAL_ROUNDS_CLASSIC}.")
     elif mode == "custom":
         pool = g.get("categories_pool", [])
-        pool_md = "\\n".join(f"- {escape_md_v2(c)}" for c in pool)
-        text = (f"*Custom Adedonha*\\nCategories pool for this game:\\n{pool_md}\\nEach round selects {len(pool)} categories randomly from the pool. Timing: same as Classic.")
+        pool_html = "\n".join(f"- {escape_html(c)}" for c in pool)
+        text = (f"<b>Custom Adedonha</b>\nCategories pool for this game:\n{pool_html}\nEach round selects {len(pool)} categories randomly from the pool. Timing: same as Classic.")
     else:
         cats = g.get("fixed_categories", [])
-        cats_md = "\\n".join(f"- {escape_md_v2(c)}" for c in cats)
-        text = (f"*Fast Adedonha*\\nFixed categories:\\n{cats_md}\\nEach round is {FAST_ROUND_SECONDS} seconds total. Total rounds: {TOTAL_ROUNDS_FAST}. First submission gives 2s immediate window.")
-    await context.bot.send_message(chat_id, text, parse_mode="MarkdownV2")
+        cats_html = "\n".join(f"- {escape_html(c)}" for c in cats)
+        text = (f"<b>Fast Adedonha</b>\nFixed categories:\n{cats_html}\nEach round is {FAST_ROUND_SECONDS} seconds total. Total rounds: {TOTAL_ROUNDS_FAST}. First submission gives 2s immediate window.")
+    await context.bot.send_message(chat_id, text, parse_mode="HTML")
 
 # ---------------- START GAME (button only starts game) ----------------
 async def start_game_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -569,9 +571,9 @@ async def run_game(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
         g["round_letter"] = letter
         g["submissions"] = {}
         g["manual_accept"] = {}
-        # send round template (as plain text to avoid MarkdownV2 entity issues)
-        cat_lines_plain = "\n".join(f"{i+1}. {c}:" for i, c in enumerate(categories))
-        intro = (f"Round {r} / {rounds}\nLetter: {letter}\n\nSend your answers in ONE MESSAGE using this template (first {len(categories)} answers will be used):\n\n{cat_lines_plain}\n\n")
+        # send round template (as plain text to avoid formatting issues)
+        cat_lines_plain = "\n".join(f"{i+1}. {escape_html(c)}:" for i, c in enumerate(categories))
+        intro = (f"Round {r} / {rounds}\nLetter: {escape_html(letter)}\n\nSend your answers in ONE MESSAGE using this template (first {len(categories)} answers will be used):\n\n{cat_lines_plain}\n\n")
         intro += f"First submission starts a {window_seconds}s window for others (fast mode total round {FAST_ROUND_SECONDS}s)."
         await context.bot.send_message(chat_id, intro)
         # schedule no submit timeout
@@ -581,7 +583,10 @@ async def run_game(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
         async def no_submit_worker():
             await asyncio.sleep(no_submit_timeout)
             if not g.get("submissions"):
-                await context.bot.send_message(chat_id, f"⏱ Round {r} ended: no submissions. No penalties.")
+                try:
+                    await context.bot.send_message(chat_id, f"⏱ Round {r} ended: no submissions. No penalties.")
+                except Exception:
+                    pass
                 g["round_scores_history"] = g.get("round_scores_history", []) + [{}]
                 end_event.set()
         no_submit_task = asyncio.create_task(no_submit_worker())
@@ -593,9 +598,9 @@ async def run_game(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
                 first_submit_time = datetime.utcnow()
                 # announce (escaped)
                 try:
-                    await context.bot.send_message(chat_id, f"⏱ {user_mention_md(int(first_submitter), g['players'][first_submitter])} submitted first! Others have {window_seconds}s to submit.", parse_mode="MarkdownV2")
+                    await context.bot.send_message(chat_id, f"⏱ {user_mention_html(int(first_submitter), g['players'][first_submitter])} submitted first! Others have {window_seconds}s to submit.", parse_mode="HTML")
                 except Exception:
-                    await context.bot.send_message(chat_id, f"{g['players'][first_submitter]} submitted first! Others have {window_seconds}s to submit.")
+                    await context.bot.send_message(chat_id, f"{escape_html(g['players'][first_submitter])} submitted first! Others have {window_seconds}s to submit.")
                 async def window_worker():
                     await asyncio.sleep(window_seconds)
                     end_event.set()
@@ -657,23 +662,23 @@ async def run_game(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
             db_update_after_round(uid, validated_count, submitted_any)
         g["round_scores_history"] = g.get("round_scores_history", []) + [round_scores]
         # summary message
-        header = f"*Round {r} Results*\\nLetter: *{escape_md_v2(letter)}*\\n\\n"
+        header = f"<b>Round {r} Results</b>\nLetter: <b>{escape_html(letter)}</b>\n\n"
         body = ""
         sorted_players = sorted(g["players"].items(), key=lambda x: -g["scores"].get(x[0],0))
         for uid, name in sorted_players:
             pts = round_scores.get(uid, {}).get("points", 0)
-            body += f"{user_mention_md(int(uid), name)} — `{pts}` pts\\n"
+            body += f"{user_mention_html(int(uid), name)} — <code>{pts}</code>\n"
         try:
-            await context.bot.send_message(chat_id, header + body, parse_mode="MarkdownV2")
+            await context.bot.send_message(chat_id, header + body, parse_mode="HTML")
         except Exception:
-            await context.bot.send_message(chat_id, header + body.replace("`",""))
+            await context.bot.send_message(chat_id, header + body)
         await asyncio.sleep(1)
     # final leaderboard
     lb = sorted(g["scores"].items(), key=lambda x: -x[1])
-    text = "*Game Over — Final Scores*\\n\\n"
+    text = "<b>Game Over — Final Scores</b>\n\n"
     for uid, pts in lb:
-        text += f"{user_mention_md(int(uid), g['players'][uid])} — `{pts}` pts\\n"
-    await context.bot.send_message(chat_id, text, parse_mode="MarkdownV2")
+        text += f"{user_mention_html(int(uid), g['players'][uid])} — <code>{pts}</code>\n"
+    await context.bot.send_message(chat_id, text, parse_mode="HTML")
     # cleanup
     games.pop(chat_id, None)
 
@@ -699,9 +704,10 @@ async def submission_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if not g.get("manual_validation_msg_id"):
             preview = ""
             for uid2, txt in g["submissions"].items():
-                preview += f"{g['players'][uid2]}: {txt[:120]}\\n"
+                preview += f"{g['players'][uid2]}: {txt[:120]}\n"
             kb = InlineKeyboardMarkup([[InlineKeyboardButton("Open validation panel ✅", callback_data="open_manual_validate")]])
-            msg = await context.bot.send_message(chat.id, f"*Manual validation required*\\nAI not configured. Admins may validate via panel.\\n\\nSubmissions preview:\\n{escape_md_v2(preview)}", parse_mode="MarkdownV2", reply_markup=kb)
+            msg_text = f"<b>Manual validation required</b>\nAI not configured. Admins may validate via panel.\n\nSubmissions preview:\n{escape_html(preview)}"
+            msg = await context.bot.send_message(chat.id, msg_text, parse_mode="HTML", reply_markup=kb)
             g["manual_validation_msg_id"] = msg.message_id
     # normal flow: run_game waits and will score after window
 
@@ -724,7 +730,7 @@ async def open_manual_validate(update: Update, context: ContextTypes.DEFAULT_TYP
     # build panel - one shared message with buttons per submission to Accept/Reject
     buttons = []
     for uid, txt in g.get("submissions", {}).items():
-        lbl = escape_md_v2(g["players"].get(uid, "Player"))
+        lbl = escape_html(g["players"].get(uid, "Player"))
         buttons.append([InlineKeyboardButton(f"✅ {lbl}", callback_data=f"validate_accept|{uid}"), InlineKeyboardButton(f"❌ {lbl}", callback_data=f"validate_reject|{uid}")])
     buttons.append([InlineKeyboardButton("Close 🛑", callback_data="validate_close")])
     if g.get("validation_panel_message_id"):
@@ -770,7 +776,7 @@ async def validation_button_handler(update: Update, context: ContextTypes.DEFAUL
         # rebuild buttons to reflect state
         buttons = []
         for uid2, txt in g.get("submissions", {}).items():
-            name = escape_md_v2(g["players"].get(uid2, "Player"))
+            name = escape_html(g["players"].get(uid2, "Player"))
             acc = g.get("manual_accept", {}).get(uid2)
             if acc is True:
                 b1 = InlineKeyboardButton(f"✅ {name}", callback_data=f"validate_accept|{uid2}")
@@ -832,8 +838,8 @@ async def gamecancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 # ---------------- CATEGORIES / MYSTATS / DUMP / RESET / LEADERBOARD ----------------
 async def categories_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = "*All possible categories (12):*\\n" + "\\n".join(f"{i+1}. {escape_md_v2(c)}" for i, c in enumerate(ALL_CATEGORIES))
-    await update.message.reply_text(text, parse_mode="MarkdownV2")
+    text = "<b>All possible categories (12):</b>\n" + "\n".join(f"{i+1}. {escape_html(c)}" for i, c in enumerate(ALL_CATEGORIES))
+    await update.message.reply_text(text, parse_mode="HTML")
 
 async def mystats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     target = update.message.reply_to_message.from_user if update.message.reply_to_message else update.effective_user
@@ -845,12 +851,12 @@ async def mystats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if row[0] == uid:
             rank = idx
             break
-    text = (f"*Stats of {user_mention_md(int(uid), target.first_name)}*\\n\\n"
-            f"• *Games played:* `{s.get('games_played',0)}`\\n"
-            f"• *Total validated words:* `{s.get('total_validated_words',0)}`\\n"
-            f"• *Wordlists sent:* `{s.get('total_wordlists_sent',0)}`\\n"
-            f"• *Global position:* `{rank}`\\n")
-    await update.message.reply_text(text, parse_mode="MarkdownV2")
+    text = (f"<b>Stats of {user_mention_html(int(uid), target.first_name)}</b>\n\n"
+            f"• <b>Games played:</b> <code>{s.get('games_played',0)}</code>\n"
+            f"• <b>Total validated words:</b> <code>{s.get('total_validated_words',0)}</code>\n"
+            f"• <b>Wordlists sent:</b> <code>{s.get('total_wordlists_sent',0)}</code>\n"
+            f"• <b>Global position:</b> <code>{rank}</code>\n")
+    await update.message.reply_text(text, parse_mode="HTML")
 
 async def dumpstats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -858,17 +864,17 @@ async def dumpstats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Only bot owner can use this command.")
         return
     rows = db_dump_all()
-    header = "user_id,games_played,total_validated_words,total_wordlists_sent\\n"
+    header = "user_id,games_played,total_validated_words,total_wordlists_sent\n"
     csv_path = "/tmp/stats_export.csv"
     with open(csv_path, "w", encoding="utf8") as f:
         f.write(header)
         for r in rows:
-            f.write(",".join(str(x) for x in r) + "\\n")
+            f.write(",".join(str(x) for x in r) + "\n")
     # send formatted text first
-    text = "*Stats export (top by validated words)*\\n\\n"
+    text = "<b>Stats export (top by validated words)</b>\n\n"
     for r in rows[:50]:
-        text += f"{escape_md_v2(r[0])} — games:{r[1]} validated:{r[2]} lists:{r[3]}\\n"
-    await update.message.reply_text(text, parse_mode="MarkdownV2")
+        text += f"{escape_html(r[0])} — games:{r[1]} validated:{r[2]} lists:{r[3]}\n"
+    await update.message.reply_text(text, parse_mode="HTML")
     await update.message.reply_document(open(csv_path, "rb"))
     await update.message.reply_document(open(DB_FILE, "rb"))
 
@@ -887,10 +893,10 @@ async def leaderboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
     rows = db_dump_all()
     top10 = rows[:10]
-    text = "*Leaderboard — Top 10 (by validated words)*\\n\\n"
+    text = "<b>Leaderboard — Top 10 (by validated words)</b>\n\n"
     for idx, r in enumerate(top10, start=1):
-        text += f"{idx}. {escape_md_v2(r[0])} — validated:{r[2]} lists:{r[3]}\\n"
-    await update.message.reply_text(text, parse_mode="MarkdownV2")
+        text += f"{idx}. {escape_html(r[0])} — validated:{r[2]} lists:{r[3]}\n"
+    await update.message.reply_text(text, parse_mode="HTML")
 
 # ---------------- VALIDATE (admin-triggered manual validation) ----------------
 async def validate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
