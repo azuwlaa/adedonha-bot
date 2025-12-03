@@ -1,21 +1,3 @@
-#!/usr/bin/env python3
-"""
-Adedonha Telegram Bot - Full Feature Version
-Compatible with: python-telegram-bot v21.4
-Place your TELEGRAM and OPENAI tokens below (replace the placeholders).
-
-Files produced:
-- main.py (this file)
-- stats.db (SQLite created at runtime)
-
-Dependencies:
-pip install python-telegram-bot==21.4 openai
-
-Usage:
-1. Edit TELEGRAM_BOT_TOKEN and OPENAI_API_KEY below (or leave OPENAI_API_KEY empty).
-2. python main.py
-"""
-
 # ---------------- CONFIG - set tokens directly here ----------------
 TELEGRAM_BOT_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN_HERE"
 OPENAI_API_KEY = "YOUR_OPENAI_API_KEY_HERE"  # optional - leave empty to use manual admin validation
