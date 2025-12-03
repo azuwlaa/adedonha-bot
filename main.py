@@ -1,4 +1,3 @@
-
 # ---------------- CONFIG - set tokens directly here ----------------
 TELEGRAM_BOT_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN_HERE"
 OPENAI_API_KEY = "YOUR_OPENAI_API_KEY_HERE"  # optional - leave empty to use manual admin validation
@@ -126,7 +125,6 @@ async def setup_db():
         logger.warning("Failed to set WAL mode: %s", e)
     # run migrations to add missing columns
     db_migrate(db_conn)
-    # ensure required columns exist for older DBs by creating them if missing (redundant but safe)
     db_lock = asyncio.Lock()
 
 # ---------------- UTIL ----------------
@@ -716,6 +714,7 @@ async def run_game(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
                 cnt = per_cat_freq[idx].get(key, 0)
                 if cnt == 1:
                     pts += 10
+# truncated due to token limits, continuing in next message...
                 else:
                     pts += 5
                 validated_count += 1
@@ -979,15 +978,24 @@ async def validate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # open panel
     await open_manual_validate(update, context)
 
-# ---------------- APP SETUP ----------------
+# ---------------- APP SETUP & MAIN ----------------
 def main():
     # create DB and run migrations synchronously first
     init_db()
-    # ensure DB connection and lock are ready before starting handlers
-    # ApplicationBuilder will run in polling loop where our async setup can be awaited before handlers execute
+    # run async DB setup before starting the bot
+    try:
+        asyncio.run(setup_db())
+    except Exception as e:
+        logger.exception("DB setup failed: %s", e)
+        return
+
+    if not TELEGRAM_BOT_TOKEN or TELEGRAM_BOT_TOKEN.startswith("YOUR_"):
+        print("Please set TELEGRAM_BOT_TOKEN in the script before running.")
+        return
+
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
 
-    # register handlers (they will run after app.run_polling starts)
+    # register handlers
     app.add_handler(CommandHandler("classicadedonha", classic_lobby))
     app.add_handler(CommandHandler("customadedonha", custom_lobby))
     app.add_handler(CommandHandler("fastadedonha", fast_lobby))
@@ -1003,26 +1011,9 @@ def main():
 
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, submission_handler))
 
-    # Start app with DB setup awaited first
-    async def _run():
-        await setup_db()
-        # if TELEGRAM_BOT_TOKEN not set, warn and exit
-        if not TELEGRAM_BOT_TOKEN or TELEGRAM_BOT_TOKEN.startswith("YOUR_"):
-            print("Please set TELEGRAM_BOT_TOKEN in the script before running.")
-            return
-        print("Bot running...")
-        await app.initialize()
-        await app.start()
-        await app.updater.start_polling() if hasattr(app, "updater") else None
-        # keep running until interrupted
-        await app.wait_closed()
-
-    try:
-        asyncio.run(_run())
-    except KeyboardInterrupt:
-        print("Shutting down...")
-    except Exception as e:
-        logger.exception("Fatal error in main: %s", e)
+    print("Bot running...")
+    # run_polling handles lifecycle internally
+    app.run_polling()
 
 if __name__ == "__main__":
     main()
