@@ -25,9 +25,11 @@ def main():
     app.add_handler(CommandHandler("customadedonha", handlers.custom_lobby))
     app.add_handler(CommandHandler("fastadedonha", handlers.fast_lobby))
     app.add_handler(CommandHandler(["joingame","join"], handlers.joingame_command))
-    app.add_handler(CallbackQueryHandler(handlers.join_callback))
-    app.add_handler(CallbackQueryHandler(handlers.mode_info_callback, pattern="mode_info"))
-    app.add_handler(CallbackQueryHandler(handlers.start_game_callback, pattern="start_game"))
+    app.add_handler(CommandHandler("startgame", handlers.startgame_command))
+    app.add_handler(CommandHandler("runinfo", handlers.runinfo_command))
+
+    app.add_handler(CallbackQueryHandler(handlers.callback_router))
+
     app.add_handler(CommandHandler("gamecancel", handlers.gamecancel_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handlers.submission_handler))
 
