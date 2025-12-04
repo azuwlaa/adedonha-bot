@@ -38,7 +38,10 @@ async def batch_validate(letter: str, categories: List[str], answers: List[str])
     indexes_to_ask = []
     for i in range(n):
         if result[i] is None:
-            found = await check_word(answers[i], categories[i], letter)
+            try:
+                found = await check_word(answers[i], categories[i], letter)
+            except Exception:
+                found = False
             if found:
                 result[i] = True
             else:
@@ -64,7 +67,7 @@ async def batch_validate(letter: str, categories: List[str], answers: List[str])
     sb.append("Rules:")
     sb.append(f"- The answer must start with the letter '{letter}' (case-insensitive). ")
     sb.append("- It must belong to the category provided.")
-    sb.append("For each item return either YES or NO in JSON form mapping indexes to true/false. Example: {\"0\": true, \"1\": false}")
+    sb.append('For each item return either YES or NO in JSON form mapping indexes to true/false. Example: {"0": true, "1": false}')
     sb.append("Do not add explanations.")
     sb.append("Items:")
     for i in indexes_to_ask:
