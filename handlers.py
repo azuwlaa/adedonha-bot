@@ -1,162 +1,527 @@
-# handlers.py — Telegram handlers and callback router
-import asyncio, html, re, json, logging
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+# handlers.py — Telegram handlers for commands and callbacks
+import asyncio
+import logging
+import re
+import time
+from datetime import datetime
+from typing import List
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
-import config, game, db, ai_validation
+import html as _html
 
-log = logging.getLogger(__name__)
+import config
+from game import games, start_game, extract_answers_from_text
+from db import init_db
 
-async def new_lobby_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Create a new lobby with round-selection buttons (6..12)"""
+logger = logging.getLogger(__name__)
+
+def escape_html(text: str) -> str:
+    if text is None:
+        return ""
+    return _html.escape(str(text), quote=False)
+
+def user_mention_html(uid: int, name: str) -> str:
+    return f'<a href="tg://user?id={uid}">{escape_html(name)}</a>'
+
+# ---------------- LOBBIES ----------------
+
+async def classic_lobby(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     user = update.effective_user
     if not chat or chat.type == "private":
         await update.message.reply_text("This command works in groups only.")
         return
-    # prevent multiple games/lobbies
-    existing = game.games.get(chat.id) or db.get_game(chat.id)
-    if existing and existing.get("state") in ("lobby", "running"):
-        await update.message.reply_text(f"{config.EMOJI_GAME} A game or lobby is already active in this group.")
+    if chat.id in games and games[chat.id].get("state") in ("lobby", "running"):
+        await update.message.reply_text("A game or lobby is already active in this group.")
         return
-    rounds = config.DEFAULT_ROUNDS
-    # build keyboard for round selection
-    kb = []
-    row = []
-    for r in config.ROUND_OPTIONS:
-        row.append(InlineKeyboardButton(str(r), callback_data=f"setrounds:{r}"))
-        if len(row) >= 4:
-            kb.append(row); row = []
-    if row: kb.append(row)
-    kb.append([InlineKeyboardButton("Join ✅", callback_data="join_lobby"),
-               InlineKeyboardButton("Start ▶️", callback_data="start_game")])
-    text = f"{config.EMOJI_GAME} New lobby by {html.escape(user.first_name)}\nRounds: {rounds}\nChoose rounds and join!\n{config.EMOJI_INFO} Each round is {config.ROUND_DURATION_SECONDS//60} minutes."
-    msg = await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
-    # create lobby in game engine
-    g = game.new_lobby(chat.id, user.id, user.first_name, rounds)
-    g["lobby_message_id"] = msg.message_id
-    db.set_game(chat.id, g)
+    lobby = {
+        "mode": "classic",
+        "categories_per_round": 5,
+        "creator_id": user.id,
+        "creator_name": user.first_name,
+        "players": {str(user.id): user.first_name},
+        "state": "lobby",
+        "created_at": datetime.utcnow().isoformat(),
+        "lobby_message_id": None,
+        "lobby_task": None,
+        "round": 0,
+        "submissions": {},
+        "manual_accept": {},
+    }
+    games[chat.id] = lobby
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton(f"Join {config.PLAYER_EMOJI}", callback_data="join_lobby")],
+        [InlineKeyboardButton("Start ▶️", callback_data="start_game")],
+        [InlineKeyboardButton("Rounds: 6️⃣", callback_data="set_rounds:6"), InlineKeyboardButton("8️⃣", callback_data="set_rounds:8"), InlineKeyboardButton("🔟", callback_data="set_rounds:10"), InlineKeyboardButton("1️⃣2️⃣", callback_data="set_rounds:12")],
+        [InlineKeyboardButton("Mode Info ℹ️", callback_data="mode_info")]
+    ])
+    players_html = user_mention_html(user.id, user.first_name)
+    text = (
+        "<b>Adedonha lobby created!</b>\n\n"
+        "Mode: <b>Classic</b>\n"
+        f"Categories per round: <b>5</b>\n"
+        f"Total rounds: <b>{config.TOTAL_ROUNDS_CLASSIC}</b>\n\n"
+        f"Players:\n{players_html}\n\nPress Join to participate."
+    )
+    msg = await update.message.reply_text(text, parse_mode="HTML", reply_markup=kb)
+    lobby["lobby_message_id"] = msg.message_id
+    try:
+        await context.bot.pin_chat_message(chat.id, msg.message_id)
+    except Exception:
+        pass
 
-async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    data = query.data or ""
-    chat = query.message.chat
-    user = query.from_user
-    # load game
-    g = game.games.get(chat.id) or db.get_game(chat.id)
-    if data.startswith("setrounds:"):
-        rounds = int(data.split(":",1)[1])
-        if not g:
-            await query.message.reply_text("No lobby found.")
-            return
-        g["rounds_total"] = rounds
-        db.set_game(chat.id, g)
-        await query.message.edit_text(f"{config.EMOJI_GAME} Lobby updated — rounds set to {rounds}")
-        return
-    if data == "join_lobby":
-        ok,msg = game.join_lobby(chat.id, user.id, user.first_name)
-        await query.message.reply_text(f"{user.first_name}: {msg}")
-        return
-    if data == "start_game":
-        if not g:
-            await query.message.reply_text("No lobby to start.")
-            return
-        ok,res = game.start_game(chat.id)
-        if not ok:
-            await query.message.reply_text("Unable to start game.")
-            return
-        g = res
-        # announce round and template
-        letter = g.get("letter","A")
-        cats = "\n".join([f"- {c}" for c in game.DEFAULT_CATEGORIES[:g.get('categories_per_round', config.CATEGORIES_PER_ROUND)]])
-        template = config.ROUND_TEMPLATE.format(letter=letter, cats=cats)
-        await query.message.reply_text(f"{config.EMOJI_GAME} Game started! Round {g['round_current']}/{g['rounds_total']}\n{template}", parse_mode="Markdown")
-        # schedule round timeout runner
-        # ensure only one runner per game
-        if g.get("lobby_task") is None:
-            g["lobby_task"] = True
-            db.set_game(chat.id, g)
-            asyncio.create_task(round_timeout_runner(chat.id, context.bot))
-        return
+    async def lobby_timeout():
+        await asyncio.sleep(config.LOBBY_TIMEOUT)
+        g = games.get(chat.id)
+        if g and g.get("state") == "lobby":
+            try:
+                await context.bot.send_message(chat.id, "cancelling lobby..")
+                await context.bot.send_message(chat.id, "Game cancelled due to inactivity")
+            except Exception:
+                pass
+            games.pop(chat.id, None)
 
-async def round_timeout_runner(chat_id: int, bot):
-    """Wait for ROUND_DURATION_SECONDS, then validate and advance."""
-    await asyncio.sleep(config.ROUND_DURATION_SECONDS)
-    # before validating, ensure game still running
-    g = game.games.get(chat_id) or db.get_game(chat_id)
-    if not g or g.get("state") != "running":
-        return
-    await bot.send_message(chat_id, f"{config.EMOJI_CLOCK} Time's up! {config.EMOJI_VALIDATE} AI validating answers...")
-    round_results = await game.advance_round(chat_id, bot)
-    # Send summarized results and updated scores
-    scores = game.get_scores(chat_id)
-    if round_results is None:
-        await bot.send_message(chat_id, f"{config.EMOJI_SUCCESS} Round processed.")
-    else:
-        # build results text
-        lines = []
-        for pid, res in round_results.items():
-            name = g.get("players",{}).get(pid,{}).get("name","Unknown")
-            lines.append(f"{name}: +{res.get('points',0)} pts")
-        await bot.send_message(chat_id, f"{config.EMOJI_SUCCESS} Round {g.get('round_current',0)-1} results:\n" + "\n".join(lines))
-    # send updated scores
-    stext = "\n".join([f"{v['name']}: {v['score']}" for k,v in scores.items()])
-    await bot.send_message(chat_id, f"{config.EMOJI_SUCCESS} Current scores:\n{stext}")
-    # check if finished
-    g = game.games.get(chat_id) or db.get_game(chat_id)
-    if g and g.get("state") == "finished":
-        await bot.send_message(chat_id, f"{config.EMOJI_GAME} Game finished! Final scores:\n{stext}")
-        game.cancel_game(chat_id)
-        return
-    # start next round runner
-    asyncio.create_task(round_timeout_runner(chat_id, bot))
+    lobby["lobby_task"] = asyncio.create_task(lobby_timeout())
 
-async def submission_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle user submissions during running game. Enforce complete lists, validate and award points."""
+async def custom_lobby(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     user = update.effective_user
-    text = update.message.text or ""
-    g = game.games.get(chat.id) or db.get_game(chat.id)
+    if not chat or chat.type == "private":
+        await update.message.reply_text("This command works in groups only.")
+        return
+    args = context.args or []
+    if not args:
+        await update.message.reply_text("Provide categories, e.g. /customadedonha Name Object Animal")
+        return
+    cats = [c.strip() for c in " ".join(args).replace(",", " ").split() if c.strip()]
+    cats = cats[:12]
+    if chat.id in games and games[chat.id].get("state") in ("lobby", "running"):
+        await update.message.reply_text("A game or lobby is already active in this group.")
+        return
+    lobby = {
+        "mode": "custom",
+        "categories_pool": cats,
+        "creator_id": user.id,
+        "creator_name": user.first_name,
+        "players": {str(user.id): user.first_name},
+        "state": "lobby",
+        "created_at": datetime.utcnow().isoformat(),
+        "lobby_message_id": None,
+        "lobby_task": None,
+        "round": 0,
+        "submissions": {},
+        "manual_accept": {},
+    }
+    games[chat.id] = lobby
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton(f"Join {config.PLAYER_EMOJI}", callback_data="join_lobby")],
+        [InlineKeyboardButton("Start ▶️", callback_data="start_game")],
+        [InlineKeyboardButton("Rounds: 6️⃣", callback_data="set_rounds:6"), InlineKeyboardButton("8️⃣", callback_data="set_rounds:8"), InlineKeyboardButton("🔟", callback_data="set_rounds:10"), InlineKeyboardButton("1️⃣2️⃣", callback_data="set_rounds:12")],
+        [InlineKeyboardButton("Mode Info ℹ️", callback_data="mode_info")]
+    ])
+    players_html = user_mention_html(user.id, user.first_name)
+    cat_lines = "\n".join(f"- {escape_html(c)}" for c in cats)
+    text = (
+        "<b>Adedonha lobby created!</b>\n\n"
+        "Mode: <b>Custom</b>\n"
+        f"Categories pool:\n{cat_lines}\n\n"
+        f"Players:\n{players_html}\n\nPress Join to participate."
+    )
+    msg = await update.message.reply_text(text, parse_mode="HTML", reply_markup=kb)
+    lobby["lobby_message_id"] = msg.message_id
+    try:
+        await context.bot.pin_chat_message(chat.id, msg.message_id)
+    except Exception:
+        pass
+
+    async def lobby_timeout():
+        await asyncio.sleep(config.LOBBY_TIMEOUT)
+        g = games.get(chat.id)
+        if g and g.get("state") == "lobby":
+            try:
+                await context.bot.send_message(chat.id, "cancelling lobby..")
+                await context.bot.send_message(chat.id, "Game cancelled due to inactivity")
+            except Exception:
+                pass
+            games.pop(chat.id, None)
+
+    lobby["lobby_task"] = asyncio.create_task(lobby_timeout())
+
+async def fast_lobby(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    user = update.effective_user
+    if not chat or chat.type == "private":
+        await update.message.reply_text("This command works in groups only.")
+        return
+    args = context.args or []
+    if not args or len(args) < 3:
+        await update.message.reply_text("Please provide exactly 3 categories, e.g. /fastadedonha Name Object Animal")
+        return
+    cats = [a.strip() for a in args[:3]]
+    if chat.id in games and games[chat.id].get("state") in ("lobby", "running"):
+        await update.message.reply_text("A game or lobby is already active in this group.")
+        return
+    lobby = {
+        "mode": "fast",
+        "fixed_categories": cats,
+        "creator_id": user.id,
+        "creator_name": user.first_name,
+        "players": {str(user.id): user.first_name},
+        "state": "lobby",
+        "created_at": datetime.utcnow().isoformat(),
+        "lobby_message_id": None,
+        "lobby_task": None,
+        "round": 0,
+        "submissions": {},
+        "manual_accept": {},
+    }
+    games[chat.id] = lobby
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton(f"Join {config.PLAYER_EMOJI}", callback_data="join_lobby")],
+        [InlineKeyboardButton("Start ▶️", callback_data="start_game")],
+        [InlineKeyboardButton("Rounds: 6️⃣", callback_data="set_rounds:6"), InlineKeyboardButton("8️⃣", callback_data="set_rounds:8"), InlineKeyboardButton("🔟", callback_data="set_rounds:10"), InlineKeyboardButton("1️⃣2️⃣", callback_data="set_rounds:12")],
+        [InlineKeyboardButton("Mode Info ℹ️", callback_data="mode_info")]
+    ])
+    players_html = user_mention_html(user.id, user.first_name)
+    cats_md = "\n".join(f"- {escape_html(c)}" for c in cats)
+    text = (
+        "<b>Adedonha lobby created!</b>\n\n"
+        "Mode: <b>Fast</b>\n"
+        f"Fixed categories:\n{cats_md}\n"
+        f"Total rounds: <b>{config.TOTAL_ROUNDS_FAST}</b>\n\n"
+        f"Players:\n{players_html}\n\nPress Join to participate."
+    )
+    msg = await update.message.reply_text(text, parse_mode="HTML", reply_markup=kb)
+    lobby["lobby_message_id"] = msg.message_id
+    try:
+        await context.bot.pin_chat_message(chat.id, msg.message_id)
+    except Exception:
+        pass
+
+    async def lobby_timeout():
+        await asyncio.sleep(config.LOBBY_TIMEOUT)
+        g = games.get(chat.id)
+        if g and g.get("state") == "lobby":
+            try:
+                await context.bot.send_message(chat.id, "cancelling lobby..")
+                await context.bot.send_message(chat.id, "Game cancelled due to inactivity")
+            except Exception:
+                pass
+            games.pop(chat.id, None)
+
+    lobby["lobby_task"] = asyncio.create_task(lobby_timeout())
+
+# ---------------- JOIN ----------------
+
+async def join_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, by_command: bool = False):
+    if update.callback_query:
+        cq = update.callback_query
+        chat_id = cq.message.chat.id
+        user = cq.from_user
+        await cq.answer()
+    else:
+        chat_id = update.effective_chat.id
+        user = update.effective_user
+
+    g = games.get(chat_id)
+    if not g or g.get("state") != "lobby":
+        if by_command:
+            await context.bot.send_message(chat_id, "No active lobby to join.")
+        return
+
+    if len(g["players"]) >= config.MAX_PLAYERS:
+        await context.bot.send_message(chat_id, "Lobby is full (10 players).")
+        return
+
+    if str(user.id) in g["players"]:
+        if by_command:
+            await context.bot.send_message(chat_id, "You already joined.")
+        else:
+            try:
+                await update.callback_query.answer("You already joined.")
+            except Exception:
+                pass
+        return
+
+    g["players"][str(user.id)] = user.first_name
+
+    # update lobby message
+    players_html = "\n".join(user_mention_html(int(uid), name) for uid, name in g["players"].items())
+    if g["mode"] == "classic":
+        text = (
+            "<b>Adedonha lobby created!</b>\n\n"
+            "Mode: <b>Classic</b>\n"
+            f"Categories per round: <b>{g['categories_per_round']}</b>\n"
+            f"Total rounds: <b>{config.TOTAL_ROUNDS_CLASSIC}</b>\n\n"
+            f"Players:\n{players_html}\n\nPress Join to participate."
+        )
+    elif g["mode"] == "custom":
+        cat_lines = "\n".join(f"- {escape_html(c)}" for c in g.get("categories_pool", []))
+        text = (
+            "<b>Adedonha lobby created!</b>\n\n"
+            "Mode: <b>Custom</b>\n"
+            f"Categories pool:\n{cat_lines}\n\n"
+            f"Players:\n{players_html}\n\nPress Join to participate."
+        )
+    else:
+        cats_md = "\n".join(f"- {escape_html(c)}" for c in g.get("fixed_categories", []))
+        text = (
+            "<b>Adedonha lobby created!</b>\n\n"
+            "Mode: <b>Fast</b>\n"
+            f"Fixed categories:\n{cats_md}\n"
+            f"Total rounds: <b>{config.TOTAL_ROUNDS_FAST}</b>\n\n"
+            f"Players:\n{players_html}\n\nPress Join to participate."
+        )
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton(f"Join {config.PLAYER_EMOJI}", callback_data="join_lobby")],
+        [InlineKeyboardButton("Start ▶️", callback_data="start_game")],
+        [InlineKeyboardButton("Rounds: 6️⃣", callback_data="set_rounds:6"), InlineKeyboardButton("8️⃣", callback_data="set_rounds:8"), InlineKeyboardButton("🔟", callback_data="set_rounds:10"), InlineKeyboardButton("1️⃣2️⃣", callback_data="set_rounds:12")],
+        [InlineKeyboardButton("Mode Info ℹ️", callback_data="mode_info")]
+    ])
+    try:
+        await context.bot.edit_message_text(text, chat_id=chat_id, message_id=g["lobby_message_id"], parse_mode="HTML", reply_markup=kb)
+    except Exception:
+        try:
+            await context.bot.send_message(chat_id, f"{user_mention_html(user.id, user.first_name)} joined the lobby.", parse_mode="HTML")
+        except Exception:
+            await context.bot.send_message(chat_id, f"{user.first_name} joined the lobby.")
+
+async def joingame_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        await update.message.delete()
+    except Exception:
+        pass
+    await join_callback(update, context, by_command=True)
+
+# ---------------- MODE INFO ----------------
+
+async def mode_info_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    cq = update.callback_query
+    chat_id = cq.message.chat.id
+    await cq.answer()
+    g = games.get(chat_id)
+    if not g:
+        await context.bot.send_message(chat_id, "No active lobby/game.")
+        return
+    mode = g["mode"]
+    if mode == "classic":
+        text = (f"<b>Classic Adedonha</b>\nEach round uses the fixed 5 categories (Name, Object, Animal, Plant, Country).\nFirst submission gives {config.CLASSIC_FIRST_WINDOW}s window. Total rounds: {config.TOTAL_ROUNDS_CLASSIC}.")
+    elif mode == "custom":
+        pool = g.get("categories_pool", [])
+        pool_html = "\n".join(f"- {escape_html(c)}" for c in pool)
+        text = (f"<b>Custom Adedonha</b>\nCategories pool for this game:\n{pool_html}\nTiming: same as Classic.")
+    else:
+        cats = g.get("fixed_categories", [])
+        cats_html = "\n".join(f"- {escape_html(c)}" for c in cats)
+        text = (f"<b>Fast Adedonha</b>\nFixed categories:\n{cats_html}\nEach round is {config.FAST_ROUND_SECONDS} seconds total. Total rounds: {config.TOTAL_ROUNDS_FAST}.")
+    await context.bot.send_message(chat_id, text, parse_mode="HTML")
+
+# ---------------- START (button) ----------------
+
+async def start_game_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    cq = update.callback_query
+    chat_id = cq.message.chat.id
+    user = cq.from_user
+    await cq.answer()
+    g = games.get(chat_id)
+    if not g or g.get("state") != "lobby":
+        await context.bot.send_message(chat_id, "No lobby to start.")
+        return
+    try:
+        member = await context.bot.get_chat_member(chat_id, user.id)
+        is_admin = member.status in ("administrator", "creator")
+    except Exception:
+        is_admin = False
+    if user.id != g["creator_id"] and not is_admin and str(user.id) not in config.OWNERS:
+        await context.bot.send_message(chat_id, "Only the creator, a chat admin, or owner can start the game.")
+        return
+    try:
+        await context.bot.unpin_chat_message(chat_id)
+    except Exception:
+        pass
+    if g.get("lobby_task"):
+        try:
+            g["lobby_task"].cancel()
+        except Exception:
+            pass
+    g["state"] = "running"
+    try:
+        await context.bot.edit_message_reply_markup(chat_id, g["lobby_message_id"], reply_markup=None)
+    except Exception:
+        pass
+    asyncio.create_task(start_game(chat_id, context))
+
+# ---------------- START (command) ----------------
+
+async def startgame_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    user = update.effective_user
+    g = games.get(chat.id)
+    if not g or g.get("state") != "lobby":
+        await update.message.reply_text("There is no lobby waiting to start.")
+        return
+    try:
+        member = await context.bot.get_chat_member(chat.id, user.id)
+        is_admin = member.status in ("administrator", "creator")
+    except Exception:
+        is_admin = False
+    if user.id != g["creator_id"] and not is_admin and str(user.id) not in config.OWNERS:
+        await update.message.reply_text("Only the creator, an admin, or bot owner can start the game.")
+        return
+    try:
+        await context.bot.unpin_chat_message(chat.id)
+    except Exception:
+        pass
+    if g.get("lobby_task"):
+        try:
+            g["lobby_task"].cancel()
+        except Exception:
+            pass
+    if g.get("lobby_message_id"):
+        try:
+            await context.bot.edit_message_reply_markup(chat.id, g["lobby_message_id"], reply_markup=None)
+        except Exception:
+            pass
+    g["state"] = "running"
+    await update.message.reply_text("Starting game…")
+    asyncio.create_task(start_game(chat.id, context))
+
+# ---------------- SUBMISSIONS ----------------
+
+async def submission_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    user = update.effective_user
+    if not chat or chat.type == "private":
+        return
+    g = games.get(chat.id)
     if not g or g.get("state") != "running":
         return
-    # parse answers
-    answers = game.extract_answers_from_text(text, categories_per_round=g.get("categories_per_round"))
-    # check completeness
-    missing = [k for k,v in answers.items() if not v]
-    if missing:
-        await update.message.reply_text(f"Please submit a complete list of {len(answers)} answers (one per line). ✏️\nMissing: {', '.join(missing)}")
+    if str(user.id) not in g["players"]:
         return
-    # save submission
-    r = g.get("round_current",1)
-    pid = str(user.id)
-    g.setdefault("submissions", {}).setdefault(str(r), {})[pid] = answers
-    db.set_game(chat.id, g)
-    # send validating message and then edit with result
-    status_msg = await update.message.reply_text(f"{config.EMOJI_VALIDATE} AI validating... Checking your list. Please wait...")
-    # perform validation (synchronously here)
-    res = ai_validation.batch_validate(g.get("letter",""), answers)
-    # compute points and details
-    points = 0
-    details = []
-    for cat, info in res.items():
-        mark = config.EMOJI_SUCCESS if info.get("valid") else "❌"
-        details.append(f"{mark} {cat}: {info.get('word')} ({info.get('reason')})")
-        if info.get("valid"):
-            points += config.POINTS_PER_VALID
-    # award points to player immediately (so scores show up in live scoreboard)
-    if pid in g.get("players",{}):
-        g["players"][pid]["score"] = g["players"][pid].get("score",0) + points
-    db.set_game(chat.id, g)
-    # edit status message with summary
-    await status_msg.edit_text(f"{config.EMOJI_VALIDATE} AI validation complete!\nPoints earned: {points}\n" + "\n".join(details))
-    # send updated score board
-    scores = game.get_scores(chat.id)
-    stext = "\n".join([f"{v['name']}: {v['score']}" for k,v in scores.items()])
-    await update.message.reply_text(f"{config.EMOJI_SUCCESS} Current scores:\n{stext}")
+    uid = str(user.id)
+    if uid in g.get("submissions", {}):
+        try:
+            await update.message.reply_text("You already submitted for this round.")
+        except Exception:
+            pass
+        return
+    text = update.message.text or ""
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    answer_lines = 0
+    for ln in lines:
+        if ':' in ln:
+            answer_lines += 1
+        elif re.match(r'^[0-9]+\.', ln):
+            answer_lines += 1
+    needed = len(g.get('current_categories', [])) or g.get('categories_per_round', 0)
+    if answer_lines < needed:
+        try:
+            await update.message.reply_text(f"⚠️ Please send a complete list with all {needed} categories, one per line (use the lobby template).")
+        except Exception:
+            pass
+        return
+    g['submissions'][uid] = text
+
+# ---------------- MANUAL VALIDATION PANEL (simplified) ----------------
+
+async def run_manual_validation_panel(chat_id: int, context):
+    """Optional admin panel - left minimal for now."""
+    g = games.get(chat_id)
+    if not g:
+        return
+    preview = "\n\n".join(f"{g['players'].get(uid, uid)}: {txt[:120]}" for uid, txt in g.get('submissions', {}).items())
+    try:
+        await context.bot.send_message(chat_id, f"Manual validation required:\n\n{preview}")
+    except Exception:
+        pass
+
+# ---------------- CALLBACK ROUTER ----------------
+
+async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    data = (update.callback_query.data or "")
+    if data == "join_lobby":
+        await join_callback(update, context)
+    elif data == "start_game":
+        await start_game_callback(update, context)
+    elif data == "mode_info":
+        await mode_info_callback(update, context)
+    else:
+        try:
+            await update.callback_query.answer("Unknown action.", show_alert=False)
+        except Exception:
+            pass
+
+    # rounds setter
+    if data.startswith("set_rounds:"):
+        try:
+            n = int(data.split(":",1)[1])
+            chat = update.effective_chat
+            g = games.get(chat.id)
+            if g and g.get("state") == "lobby":
+                g[\"rounds_total\"] = n
+                await update.callback_query.edit_message_text(f\"✅ Total rounds set to {n}.\")
+            else:
+                await update.callback_query.answer(\"No lobby to set rounds.\", show_alert=True)
+        except Exception:
+            await update.callback_query.answer(\"Invalid rounds.\", show_alert=True)
+        return
+
+# ---------------- RUNINFO ----------------
+
+async def runinfo_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if str(user.id) not in config.OWNERS:
+        await update.message.reply_text("Only bot owners can use /runinfo.")
+        return
+    now = time.time()
+    uptime_seconds = int(now - config.START_TIME)
+    days = uptime_seconds // 86400
+    hours = (uptime_seconds % 86400) // 3600
+    minutes = (uptime_seconds % 3600) // 60
+    seconds = uptime_seconds % 60
+    if days > 0:
+        uptime_str = f"{days}.{hours:02}:{minutes:02}:{seconds:02}"
+    else:
+        uptime_str = f"{hours:02}:{minutes:02}:{seconds:02}"
+    active_games = 0
+    total_players = 0
+    for chat_id, g in games.items():
+        if g.get("state") in ("lobby", "running"):
+            active_games += 1
+            total_players += len(g.get("players", {}))
+    text = (
+        "<b>Run information</b>\n"
+        f"Uptime: <code>{uptime_str}</code>\n"
+        f"Current Games: <b>{active_games}</b>\n"
+        f"Current Players: <b>{total_players}</b>"
+    )
+    await update.message.reply_text(text, parse_mode="HTML")
+
+# ---------------- GAME CANCEL ----------------
 
 async def gamecancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
-    if not chat:
+    user = update.effective_user
+    g = games.get(chat.id)
+    if not g:
+        await update.message.reply_text("No active game or lobby to cancel.")
         return
-    game.cancel_game(chat.id)
-    await update.message.reply_text(f"{config.EMOJI_GAME} Game/lobby cancelled and removed.")
+    try:
+        member = await context.bot.get_chat_member(chat.id, user.id)
+        is_admin = member.status in ("administrator", "creator")
+    except Exception:
+        is_admin = False
+    if user.id != g["creator_id"] and not is_admin and str(user.id) not in config.OWNERS:
+        await update.message.reply_text("Only the creator, a chat admin, or bot owner can cancel the game.")
+        return
+    try:
+        await context.bot.unpin_chat_message(chat.id)
+    except Exception:
+        pass
+    if g.get("lobby_task"):
+        try:
+            g["lobby_task"].cancel()
+        except Exception:
+            pass
+    games.pop(chat.id, None)
+    await update.message.reply_text("Game cancelled.")
