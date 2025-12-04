@@ -26,6 +26,15 @@ def init_db():
             total_wordlists_sent INTEGER DEFAULT 0
         )
     """)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS words (
+            word TEXT,
+            category TEXT,
+            letter TEXT,
+            added_at TEXT,
+            PRIMARY KEY (word, category)
+        )
+    """)
     conn.commit()
     _conn = conn
     _lock = asyncio.Lock()
@@ -93,3 +102,34 @@ async def reset_all():
         c = _conn.cursor()
         c.execute("UPDATE stats SET games_played=0, total_validated_words=0, total_wordlists_sent=0")
         _conn.commit()
+
+# ---------------- Word knowledge helpers ----------------
+
+async def save_word(word: str, category: str, letter: str):
+    """Save a validated word to the local knowledge DB."""
+    global _conn, _lock
+    if _conn is None:
+        raise RuntimeError("DB not initialized")
+    w = word.strip().lower()
+    cstr = category.strip().lower()
+    l = letter.strip().lower() if letter else (w[0] if w else "")
+    async with _lock:
+        c = _conn.cursor()
+        try:
+            c.execute("INSERT OR IGNORE INTO words (word, category, letter, added_at) VALUES (?, ?, ?, datetime('now'))", (w, cstr, l))
+            _conn.commit()
+        except Exception as e:
+            logger.debug("save_word failed: %s", e)
+
+async def check_word(word: str, category: str, letter: str) -> bool:
+    """Check whether a word exists in the local knowledge DB."""
+    global _conn, _lock
+    if _conn is None:
+        raise RuntimeError("DB not initialized")
+    w = word.strip().lower()
+    cstr = category.strip().lower()
+    l = letter.strip().lower() if letter else (w[0] if w else "")
+    async with _lock:
+        c = _conn.cursor()
+        c.execute("SELECT 1 FROM words WHERE word=? AND category=? AND letter=?", (w, cstr, l))
+        return c.fetchone() is not None
