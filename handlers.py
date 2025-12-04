@@ -52,7 +52,10 @@ async def classic_lobby(update: Update, context: ContextTypes.DEFAULT_TYPE):
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton(f"Join {config.PLAYER_EMOJI}", callback_data="join_lobby")],
         [InlineKeyboardButton("Start ▶️", callback_data="start_game")],
-        [InlineKeyboardButton("Rounds: 6️⃣", callback_data="set_rounds:6"), InlineKeyboardButton("8️⃣", callback_data="set_rounds:8"), InlineKeyboardButton("🔟", callback_data="set_rounds:10"), InlineKeyboardButton("1️⃣2️⃣", callback_data="set_rounds:12")],
+        [InlineKeyboardButton("Rounds: 6️⃣", callback_data="set_rounds:6"),
+         InlineKeyboardButton("8️⃣", callback_data="set_rounds:8"),
+         InlineKeyboardButton("🔟", callback_data="set_rounds:10"),
+         InlineKeyboardButton("1️⃣2️⃣", callback_data="set_rounds:12")],
         [InlineKeyboardButton("Mode Info ℹ️", callback_data="mode_info")]
     ])
     players_html = user_mention_html(user.id, user.first_name)
@@ -116,7 +119,6 @@ async def custom_lobby(update: Update, context: ContextTypes.DEFAULT_TYPE):
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton(f"Join {config.PLAYER_EMOJI}", callback_data="join_lobby")],
         [InlineKeyboardButton("Start ▶️", callback_data="start_game")],
-        [InlineKeyboardButton("Rounds: 6️⃣", callback_data="set_rounds:6"), InlineKeyboardButton("8️⃣", callback_data="set_rounds:8"), InlineKeyboardButton("🔟", callback_data="set_rounds:10"), InlineKeyboardButton("1️⃣2️⃣", callback_data="set_rounds:12")],
         [InlineKeyboardButton("Mode Info ℹ️", callback_data="mode_info")]
     ])
     players_html = user_mention_html(user.id, user.first_name)
@@ -179,7 +181,6 @@ async def fast_lobby(update: Update, context: ContextTypes.DEFAULT_TYPE):
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton(f"Join {config.PLAYER_EMOJI}", callback_data="join_lobby")],
         [InlineKeyboardButton("Start ▶️", callback_data="start_game")],
-        [InlineKeyboardButton("Rounds: 6️⃣", callback_data="set_rounds:6"), InlineKeyboardButton("8️⃣", callback_data="set_rounds:8"), InlineKeyboardButton("🔟", callback_data="set_rounds:10"), InlineKeyboardButton("1️⃣2️⃣", callback_data="set_rounds:12")],
         [InlineKeyboardButton("Mode Info ℹ️", callback_data="mode_info")]
     ])
     players_html = user_mention_html(user.id, user.first_name)
@@ -275,7 +276,6 @@ async def join_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, by_c
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton(f"Join {config.PLAYER_EMOJI}", callback_data="join_lobby")],
         [InlineKeyboardButton("Start ▶️", callback_data="start_game")],
-        [InlineKeyboardButton("Rounds: 6️⃣", callback_data="set_rounds:6"), InlineKeyboardButton("8️⃣", callback_data="set_rounds:8"), InlineKeyboardButton("🔟", callback_data="set_rounds:10"), InlineKeyboardButton("1️⃣2️⃣", callback_data="set_rounds:12")],
         [InlineKeyboardButton("Mode Info ℹ️", callback_data="mode_info")]
     ])
     try:
@@ -416,7 +416,7 @@ async def submission_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     needed = len(g.get('current_categories', [])) or g.get('categories_per_round', 0)
     if answer_lines < needed:
         try:
-            await update.message.reply_text(f"⚠️ Please send a complete list with all {needed} categories, one per line (use the lobby template).")
+            await update.message.reply_text(f"⚠️ Please send a complete list with all {needed} categories.")
         except Exception:
             pass
         return
@@ -445,26 +445,25 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await start_game_callback(update, context)
     elif data == "mode_info":
         await mode_info_callback(update, context)
-    else:
-        try:
-            await update.callback_query.answer("Unknown action.", show_alert=False)
-        except Exception:
-            pass
-
-    # rounds setter
-    if data.startswith("set_rounds:"):
+    elif data.startswith("set_rounds:"):
         try:
             n = int(data.split(":",1)[1])
             chat = update.effective_chat
             g = games.get(chat.id)
             if g and g.get("state") == "lobby":
-                g[\"rounds_total\"] = n
-                await update.callback_query.edit_message_text(f\"✅ Total rounds set to {n}.\")
+                g["rounds_total"] = n
+                await update.callback_query.answer(f"Rounds set to {n}!", show_alert=False)
             else:
-                await update.callback_query.answer(\"No lobby to set rounds.\", show_alert=True)
+                await update.callback_query.answer("No lobby to set rounds.", show_alert=True)
         except Exception:
-            await update.callback_query.answer(\"Invalid rounds.\", show_alert=True)
+            await update.callback_query.answer("Invalid rounds.", show_alert=True)
         return
+
+    else:
+        try:
+            await update.callback_query.answer("Unknown action.", show_alert=False)
+        except Exception:
+            pass
 
 # ---------------- RUNINFO ----------------
 
