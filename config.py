@@ -1,7 +1,8 @@
-# config.py — edit tokens here
+# config.py — edit tokens and constants here
+import time
 
 # ---------------- TOKENS ----------------
-TELEGRAM_BOT_TOKEN = ""  # set your bot token here (string)
+TELEGRAM_BOT_TOKEN = ""  # set your bot token here
 OPENAI_API_KEY = ""      # optional — leave empty to disable AI
 
 # ---------------- OWNERS / ADMINS ----------------
@@ -45,3 +46,6 @@ EMOJI_THIRD = "🍀"
 # AI batch validation settings
 AI_MAX_RETRIES = 2
 AI_TIMEOUT_SECONDS = 10
+
+# Bot start time for uptime reporting
+START_TIME = time.time()
