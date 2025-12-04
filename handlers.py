@@ -28,7 +28,7 @@ def user_mention_html(uid: int, name: str) -> str:
 async def classic_lobby(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     user = update.effective_user
-    if chat.type == "private":
+    if not chat or chat.type == "private":
         await update.message.reply_text("This command works in groups only.")
         return
     if chat.id in games and games[chat.id].get("state") in ("lobby", "running"):
@@ -85,7 +85,7 @@ async def classic_lobby(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def custom_lobby(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     user = update.effective_user
-    if chat.type == "private":
+    if not chat or chat.type == "private":
         await update.message.reply_text("This command works in groups only.")
         return
     args = context.args or []
@@ -148,7 +148,7 @@ async def custom_lobby(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def fast_lobby(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     user = update.effective_user
-    if chat.type == "private":
+    if not chat or chat.type == "private":
         await update.message.reply_text("This command works in groups only.")
         return
     args = context.args or []
@@ -277,7 +277,10 @@ async def join_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, by_c
     try:
         await context.bot.edit_message_text(text, chat_id=chat_id, message_id=g["lobby_message_id"], parse_mode="HTML", reply_markup=kb)
     except Exception:
-        await context.bot.send_message(chat_id, f"{user_mention_html(user.id, user.first_name)} joined the lobby.", parse_mode="HTML")
+        try:
+            await context.bot.send_message(chat_id, f"{user_mention_html(user.id, user.first_name)} joined the lobby.", parse_mode="HTML")
+        except Exception:
+            await context.bot.send_message(chat_id, f"{user.first_name} joined the lobby.")
 
 async def joingame_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -384,7 +387,7 @@ async def startgame_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def submission_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     user = update.effective_user
-    if chat.type == "private":
+    if not chat or chat.type == "private":
         return
     g = games.get(chat.id)
     if not g or g.get("state") != "running":
@@ -418,7 +421,6 @@ async def run_manual_validation_panel(chat_id: int, context):
     g = games.get(chat_id)
     if not g:
         return
-    # Build a simple summary message
     preview = "\n\n".join(f"{g['players'].get(uid, uid)}: {txt[:120]}" for uid, txt in g.get('submissions', {}).items())
     try:
         await context.bot.send_message(chat_id, f"Manual validation required:\n\n{preview}")
@@ -429,8 +431,6 @@ async def run_manual_validation_panel(chat_id: int, context):
 
 async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = (update.callback_query.data or "")
-    # debug print (uncomment if needed)
-    # print("CALLBACK RECEIVED:", data)
     if data == "join_lobby":
         await join_callback(update, context)
     elif data == "start_game":
@@ -473,3 +473,32 @@ async def runinfo_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Current Players: <b>{total_players}</b>"
     )
     await update.message.reply_text(text, parse_mode="HTML")
+
+# ---------------- GAME CANCEL ----------------
+
+async def gamecancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    user = update.effective_user
+    g = games.get(chat.id)
+    if not g:
+        await update.message.reply_text("No active game or lobby to cancel.")
+        return
+    try:
+        member = await context.bot.get_chat_member(chat.id, user.id)
+        is_admin = member.status in ("administrator", "creator")
+    except Exception:
+        is_admin = False
+    if user.id != g["creator_id"] and not is_admin and str(user.id) not in config.OWNERS:
+        await update.message.reply_text("Only the creator, a chat admin, or bot owner can cancel the game.")
+        return
+    try:
+        await context.bot.unpin_chat_message(chat.id)
+    except Exception:
+        pass
+    if g.get("lobby_task"):
+        try:
+            g["lobby_task"].cancel()
+        except Exception:
+            pass
+    games.pop(chat.id, None)
+    await update.message.reply_text("Game cancelled.")
