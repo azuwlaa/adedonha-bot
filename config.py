@@ -1,51 +1,31 @@
-# config.py — edit tokens and constants here
-import time
+# config.py — configuration and constants
+import os
 
-# ---------------- TOKENS ----------------
-TELEGRAM_BOT_TOKEN = ""  # set your bot token here
-OPENAI_API_KEY = ""      # optional — leave empty to disable AI
+TELEGRAM_BOT_TOKEN = ""  # fill your token
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 
-# ---------------- OWNERS / ADMINS ----------------
-OWNERS = {"624102836", "1707015091"}  # string IDs
+# Game UI / behavior
+ROUND_OPTIONS = list(range(6,13))  # 6..12 rounds available
+DEFAULT_ROUNDS = 6
+ROUND_DURATION_SECONDS = 3 * 60  # each round 3 minutes
+CATEGORIES_PER_ROUND = 5
+PLAYER_EMOJI = "🧑"
+EMOJI_VALIDATE = "🤖"
+EMOJI_SUCCESS = "✅"
+EMOJI_GAME = "🎮"
+EMOJI_INFO = "ℹ️"
+EMOJI_CLOCK = "⏱️"
+POINTS_PER_VALID = 10
 
-# ---------------- GAME CONSTANTS ----------------
-MAX_PLAYERS = 10
-LOBBY_TIMEOUT = 5 * 60
-CLASSIC_NO_SUBMIT_TIMEOUT = 3 * 60
-CLASSIC_FIRST_WINDOW = 2
-FAST_ROUND_SECONDS = 60
-FAST_FIRST_WINDOW = 2
-TOTAL_ROUNDS_CLASSIC = 10
-TOTAL_ROUNDS_FAST = 12
-DB_FILE = "stats.db"
-AI_MODEL = "gpt-4.1-mini"
-PLAYER_EMOJI = "🦩"
+# Template for rounds (monospace)
+ROUND_TEMPLATE = "```
+Letter: {letter}
+Categories:
+{cats}
+```"
 
-ALL_CATEGORIES = [
-    "Name",
-    "Object",
-    "Animal",
-    "Plant",
-    "City",
-    "Country",
-    "State",
-    "Food",
-    "Color",
-    "Movie/Series/TV Show",
-    "Place",
-    "Fruit",
-    "Profession",
-    "Adjective",
-]
+# Database / persistence path (optional)
+STORE_FILE = "/mnt/data/adedonha_store.json"
 
-# Display emojis for round-end
-EMOJI_WINNER = "🏆"
-EMOJI_SECOND = "✨"
-EMOJI_THIRD = "🍀"
-
-# AI batch validation settings
-AI_MAX_RETRIES = 2
-AI_TIMEOUT_SECONDS = 10
-
-# Bot start time for uptime reporting
-START_TIME = time.time()
+# Owners (string ids)
+OWNERS = {"624102836", "1707015091"}
