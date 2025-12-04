@@ -3,12 +3,19 @@ import random
 import asyncio
 from typing import Dict, List
 from datetime import datetime
-from config import ALL_CATEGORIES, PLAYER_EMOJI, TOTAL_ROUNDS_CLASSIC, TOTAL_ROUNDS_FAST, CLASSIC_FIRST_WINDOW, CLASSIC_NO_SUBMIT_TIMEOUT, FAST_FIRST_WINDOW, FAST_ROUND_SECONDS, EMOJI_WINNER, EMOJI_SECOND, EMOJI_THIRD
+import html as _html
+
+from config import ALL_CATEGORIES, TOTAL_ROUNDS_CLASSIC, TOTAL_ROUNDS_FAST, CLASSIC_FIRST_WINDOW, CLASSIC_NO_SUBMIT_TIMEOUT, FAST_FIRST_WINDOW, FAST_ROUND_SECONDS, EMOJI_WINNER, EMOJI_SECOND, EMOJI_THIRD
 from ai_validation import batch_validate
-from db import update_after_round, update_after_game
+from db import update_after_round, update_after_game, save_word
 
 # games storage: chat_id -> game dict
 games: Dict[int, Dict] = {}
+
+def escape_html(text: str) -> str:
+    if text is None:
+        return ""
+    return _html.escape(str(text), quote=False)
 
 def extract_answers_from_text(text: str, count: int) -> List[str]:
     lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
@@ -29,7 +36,7 @@ async def start_game(chat_id: int, context):
     g = games.get(chat_id)
     if not g:
         return
-    mode = g["mode"]
+    mode = g.get("mode", "classic")
     rounds = TOTAL_ROUNDS_CLASSIC if mode in ("classic", "custom") else TOTAL_ROUNDS_FAST
     g["scores"] = {uid: 0 for uid in g["players"].keys()}
     await update_after_game(list(g["players"].keys()))
@@ -61,10 +68,13 @@ async def start_game(chat_id: int, context):
         g["manual_accept"] = {}
 
         pre_block = "\n".join(f"{i+1}. {c}:" for i, c in enumerate(categories))
-        intro = (f"Round {r} / {rounds}\nLetter: {letter}\n\n" + f"<pre>{pre_block}</pre>\n\nSend your answers in ONE MESSAGE using the template above (first {len(categories)} answers will be used).\n")
+        intro = (f"Round {r} / {rounds}\nLetter: {letter}\n\n" +
+                 f"<pre>{pre_block}</pre>\n\n" +
+                 f"Send your answers in ONE MESSAGE using the template above (first {len(categories)} answers will be used).\n")
         intro += f"First submission starts a {window_seconds}s window for others."
         await context.bot.send_message(chat_id, intro, parse_mode="HTML")
 
+        # schedule no submit timeout
         end_event = asyncio.Event()
         first_submitter = None
         first_submit_time = None
@@ -79,6 +89,7 @@ async def start_game(chat_id: int, context):
                 end_event.set()
         no_submit_task = asyncio.create_task(no_submit_worker())
 
+        # wait loop - submissions are collected via submission_handler
         while not end_event.is_set():
             await asyncio.sleep(0.5)
             if g.get("submissions") and not first_submitter:
@@ -95,6 +106,7 @@ async def start_game(chat_id: int, context):
             if round_time_limit and first_submit_time:
                 if (datetime.utcnow() - first_submit_time).total_seconds() >= round_time_limit:
                     end_event.set()
+
         try:
             no_submit_task.cancel()
         except Exception:
@@ -117,8 +129,8 @@ async def start_game(chat_id: int, context):
                     per_cat_freq[idx][key] = per_cat_freq[idx].get(key, 0) + 1
 
         round_scores = {}
-        # For each player, batch-validate their answers with AI
         for uid, answers in parsed.items():
+            # batch validate per player
             valid_map = await batch_validate(g["round_letter"], categories, answers)
             pts = 0
             validated_count = 0
@@ -130,6 +142,7 @@ async def start_game(chat_id: int, context):
                 if a_clean[0].upper() != g["round_letter"].upper():
                     continue
                 valid = valid_map.get(idx, False)
+                # manual accept override
                 man = g.get("manual_accept", {}).get(uid)
                 if man is True:
                     valid = True
@@ -141,6 +154,11 @@ async def start_game(chat_id: int, context):
                     pts += 10
                 else:
                     pts += 5
+                # save to local DB for future offline validation
+                try:
+                    await save_word(a_clean, categories[idx], g["round_letter"])
+                except Exception:
+                    pass
                 validated_count += 1
             round_scores[uid] = {"points": pts, "validated": validated_count, "submitted_any": submitted_any}
             g["scores"][uid] = g["scores"].get(uid, 0) + pts
@@ -148,7 +166,7 @@ async def start_game(chat_id: int, context):
 
         g["round_scores_history"] = g.get("round_scores_history", []) + [round_scores]
 
-        # round summary with cute emojis
+        # summary message with emojis
         header = f"<b>🏁 Round {r} Results</b>\nLetter: <b>{g['round_letter']}</b>\n\n"
         body = ""
         sorted_players = sorted(g["players"].items(), key=lambda x: -g["scores"].get(x[0],0))
@@ -170,6 +188,7 @@ async def start_game(chat_id: int, context):
 
         await asyncio.sleep(1)
 
+    # final leaderboard
     lb = sorted(g["scores"].items(), key=lambda x: -x[1])
     text = "<b>Game Over — Final Scores</b>\n\n"
     for uid, pts in lb:
