@@ -1,135 +1,59 @@
-# db.py — sqlite helpers (synchronous connection used with asyncio Lock)
-import sqlite3
-import asyncio
-import logging
-from typing import Optional
-from config import DB_FILE
+# db.py — simple JSON-backed storage and helpers used by game engine
+import json, os
+from typing import Dict, Any
 
-logger = logging.getLogger(__name__)
+STORE_FILE = "/mnt/data/adedonha_store.json"
 
-_conn: Optional[sqlite3.Connection] = None
-_lock: Optional[asyncio.Lock] = None
+_state = {"games": {}, "words": {}}  # words can be used as known-good cache
 
-def init_db():
-    global _conn, _lock
-    conn = sqlite3.connect(DB_FILE, check_same_thread=False)
+def load_store():
+    global _state
     try:
-        conn.execute("PRAGMA journal_mode=WAL;")
+        if os.path.exists(STORE_FILE):
+            with open(STORE_FILE, "r", encoding="utf-8") as f:
+                _state = json.load(f)
+    except Exception:
+        _state = {"games": {}, "words": {}}
+
+def save_store():
+    try:
+        with open(STORE_FILE, "w", encoding="utf-8") as f:
+            json.dump(_state, f, ensure_ascii=False, indent=2)
     except Exception:
         pass
-    c = conn.cursor()
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS stats (
-            user_id TEXT PRIMARY KEY,
-            games_played INTEGER DEFAULT 0,
-            total_validated_words INTEGER DEFAULT 0,
-            total_wordlists_sent INTEGER DEFAULT 0
-        )
-    """)
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS words (
-            word TEXT,
-            category TEXT,
-            letter TEXT,
-            added_at TEXT,
-            PRIMARY KEY (word, category)
-        )
-    """)
-    conn.commit()
-    _conn = conn
-    _lock = asyncio.Lock()
 
-async def ensure_user(uid: str):
-    global _conn, _lock
-    if _conn is None:
-        raise RuntimeError("DB not initialized")
-    async with _lock:
-        c = _conn.cursor()
-        c.execute("INSERT OR IGNORE INTO stats (user_id) VALUES (?)", (uid,))
-        _conn.commit()
+def get_game(chat_id):
+    load_store()
+    return _state["games"].get(str(chat_id))
 
-async def update_after_round(uid: str, validated_words: int, submitted_any: bool):
-    global _conn, _lock
-    if _conn is None:
-        raise RuntimeError("DB not initialized")
-    async with _lock:
-        c = _conn.cursor()
-        c.execute("INSERT OR IGNORE INTO stats (user_id) VALUES (?)", (uid,))
-        if submitted_any:
-            c.execute(
-                "UPDATE stats SET total_wordlists_sent = total_wordlists_sent + 1, total_validated_words = total_validated_words + ? WHERE user_id=?",
-                (validated_words, uid)
-            )
-        _conn.commit()
+def set_game(chat_id, data):
+    load_store()
+    _state["games"][str(chat_id)] = data
+    save_store()
 
-async def update_after_game(user_ids: list):
-    global _conn, _lock
-    if _conn is None:
-        raise RuntimeError("DB not initialized")
-    async with _lock:
-        c = _conn.cursor()
-        for uid in user_ids:
-            c.execute("INSERT OR IGNORE INTO stats (user_id) VALUES (?)", (uid,))
-            c.execute("UPDATE stats SET games_played = games_played + 1 WHERE user_id=?", (uid,))
-        _conn.commit()
+def del_game(chat_id):
+    load_store()
+    _state["games"].pop(str(chat_id), None)
+    save_store()
 
-async def get_stats(uid: str):
-    global _conn, _lock
-    if _conn is None:
-        raise RuntimeError("DB not initialized")
-    async with _lock:
-        c = _conn.cursor()
-        c.execute("SELECT games_played, total_validated_words, total_wordlists_sent FROM stats WHERE user_id=?", (uid,))
-        row = c.fetchone()
-        if row:
-            return {"games_played": row[0] or 0, "total_validated_words": row[1] or 0, "total_wordlists_sent": row[2] or 0}
-        return {"games_played": 0, "total_validated_words": 0, "total_wordlists_sent": 0}
+def save_word(word, valid=True):
+    load_store()
+    _state["words"][word.lower()] = {"valid": bool(valid)}
+    save_store()
 
-async def dump_all():
-    global _conn, _lock
-    if _conn is None:
-        raise RuntimeError("DB not initialized")
-    async with _lock:
-        c = _conn.cursor()
-        c.execute("SELECT user_id,games_played,total_validated_words,total_wordlists_sent FROM stats ORDER BY total_validated_words DESC")
-        return c.fetchall()
+def is_known_word(word):
+    load_store()
+    return _state["words"].get(word.lower())
 
-async def reset_all():
-    global _conn, _lock
-    if _conn is None:
-        raise RuntimeError("DB not initialized")
-    async with _lock:
-        c = _conn.cursor()
-        c.execute("UPDATE stats SET games_played=0, total_validated_words=0, total_wordlists_sent=0")
-        _conn.commit()
+# helpers expected by original code (no-op safe implementations)
+def update_after_round(chat_id, round_num, round_results):
+    # called by game engine to persist after a round
+    g = get_game(chat_id) or {}
+    g.setdefault("history",[]).append({"round": round_num, "results": round_results})
+    set_game(chat_id, g)
 
-# ---------------- Word knowledge helpers ----------------
-
-async def save_word(word: str, category: str, letter: str):
-    """Save a validated word to the local knowledge DB."""
-    global _conn, _lock
-    if _conn is None:
-        raise RuntimeError("DB not initialized")
-    w = word.strip().lower()
-    cstr = category.strip().lower()
-    l = letter.strip().lower() if letter else (w[0] if w else "")
-    async with _lock:
-        c = _conn.cursor()
-        try:
-            c.execute("INSERT OR IGNORE INTO words (word, category, letter, added_at) VALUES (?, ?, ?, datetime('now'))", (w, cstr, l))
-            _conn.commit()
-        except Exception as e:
-            logger.debug("save_word failed: %s", e)
-
-async def check_word(word: str, category: str, letter: str) -> bool:
-    """Check whether a word exists in the local knowledge DB."""
-    global _conn, _lock
-    if _conn is None:
-        raise RuntimeError("DB not initialized")
-    w = word.strip().lower()
-    cstr = category.strip().lower()
-    l = letter.strip().lower() if letter else (w[0] if w else "")
-    async with _lock:
-        c = _conn.cursor()
-        c.execute("SELECT 1 FROM words WHERE word=? AND category=? AND letter=?", (w, cstr, l))
-        return c.fetchone() is not None
+def update_after_game(chat_id, final_results):
+    # called at game end
+    g = get_game(chat_id) or {}
+    g["final_results"] = final_results
+    set_game(chat_id, g)
